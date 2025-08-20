@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import math
 import os
 import random
 from typing import Optional, Tuple
@@ -119,6 +120,7 @@ async def estimate_move_of_game(
     epsilon: float = 0.0,
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
+    cvar_alpha: Optional[float] = None,
 ) -> Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
     """
     Estimate the value of the next move in the game using the provided executer.
@@ -181,9 +183,18 @@ async def estimate_move_of_game(
         if move not in value_map:
             value_map[move] = []
         value_map[move].append(q)
-    move_values = {
-        move: sum(values) / len(values) for move, values in value_map.items()
-    }
+    if cvar_alpha is not None:
+
+        def cvar(vals: list[float]) -> float:
+            sv = list(sorted(vals))
+            m = max(1, int(math.ceil(cvar_alpha * len(sv))))
+            return sum(sv[:m]) / m
+
+        move_values = {move: cvar(values) for move, values in value_map.items()}
+    else:
+        move_values = {
+            move: sum(values) / len(values) for move, values in value_map.items()
+        }
     if is_verbose:
         print("Move values:", move_values)
     best_move = max(move_values, key=move_values.get)
@@ -197,6 +208,7 @@ async def play_game_with_executor(
     epsilon: float = 0.0,
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
+    cvar_alpha: Optional[float] = None,
 ) -> bool:
     """
     Play the game using the executor to estimate the best moves.
@@ -208,6 +220,7 @@ async def play_game_with_executor(
             epsilon=epsilon,
             is_verbose=is_verbose,
             score_args=score_args,
+            cvar_alpha=cvar_alpha,
         )
         if move is None:
             if is_verbose:
@@ -240,8 +253,11 @@ async def loop_log_play_game_with_executor(
     epsilon: float = 0.0,
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
+    cvar_alpha: Optional[float] = None,
 ) -> None:
     path = os.path.join(log_dir, model_name)
+    if cvar_alpha is not None:
+        path += f"_cvar{cvar_alpha:.2f}"
     os.makedirs(path, exist_ok=True)
     while True:
         game = SolitireGame()
@@ -252,6 +268,7 @@ async def loop_log_play_game_with_executor(
             max_moves=max_moves,
             is_verbose=is_verbose,
             score_args=score_args,
+            cvar_alpha=cvar_alpha,
         )
         filename = os.path.join(path, create_datetime_str() + ".pickle")
         game.save_to_file(filename)
@@ -268,6 +285,7 @@ def batched_loop_log_play_game(
     epsilon: float = 0.0,
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
+    cvar_alpha: Optional[float] = None,
 ) -> None:
     executor = SolitireValueBatchedExecuter(model, batch_size=batch_size)
     executor.start()
@@ -281,5 +299,6 @@ def batched_loop_log_play_game(
                 epsilon=epsilon,
                 score_args=score_args,
                 is_verbose=is_verbose,
+                cvar_alpha=cvar_alpha,
             )
         )
