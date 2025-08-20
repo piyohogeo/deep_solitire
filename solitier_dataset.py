@@ -7,7 +7,7 @@ import os
 import pickle
 import random
 from functools import partial
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -831,3 +831,53 @@ def load_solitire_dir_stratified_dataloader(
         total_train_size,
         train_dataset.complete_rate,
     )
+
+
+def compute_target_stats_from_dataloader(
+    dataloader,
+    *,
+    # is_complete でフィルタしたい場合に使う:
+    #   None … フィルタしない（デフォルト）
+    #   True … is_complete==True のサンプルだけ使う
+    #   False… is_complete==False のサンプルだけ使う
+    filter_by_is_complete: Optional[bool] = None,
+    eps: float = 1e-12,
+) -> Tuple[float, float]:
+    """
+    DataLoader からターゲット（score）の μ, σ を計算する。
+    バッチは (tokens, score, is_complete) 形式を想定。
+    """
+
+    def _to_numpy(x):
+        if torch.is_tensor(x):
+            return x.detach().cpu().float().numpy()
+        return np.asarray(x, dtype=np.float32)
+
+    sumw = 0.0
+    sumwy = 0.0
+    sumwy2 = 0.0
+
+    for batch in tqdm(dataloader):
+        # (tokens, score, is_complete) を想定
+        if not (isinstance(batch, (tuple, list)) and len(batch) >= 3):
+            raise ValueError("Batch must be (tokens, score, is_complete).")
+
+        scores = batch[1]
+
+        y = _to_numpy(scores).reshape(-1)
+        if y.size == 0:
+            continue
+
+        # 等重みで集計
+        sumw += float(y.size)
+        sumwy += float(y.sum())
+        sumwy2 += float((y**2).sum())
+
+    if sumw <= 0:
+        # 何も集計できなかった場合のフォールバック
+        return 0.0, 1.0
+
+    mu = sumwy / sumw
+    var = max(eps, (sumwy2 / sumw) - mu * mu)
+    sigma = math.sqrt(var)
+    return float(mu), float(sigma)

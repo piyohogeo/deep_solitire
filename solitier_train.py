@@ -666,6 +666,8 @@ class SolitireEndToEndValueTrainer:
             log_basename += "_dss"
         if model_params["score_args"].get("is_delta", False):
             log_basename += "_dl"
+        if "target_norm" in model_params:
+            log_basename += "_tn"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_basename += f"_{timestamp}"
         self.log_path = os.path.join(
@@ -699,7 +701,15 @@ class SolitireEndToEndValueTrainer:
         self.scheduler = torch.optim.lr_scheduler.SequentialLR(
             self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
         )
-        self.criterion = nn.MSELoss()
+        if "target_norm" in model_params:
+            self.target_norm = model_params["target_norm"]
+            self.criterion = nn.HuberLoss(
+                delta=1.0,
+                reduction="mean",
+            )
+        else:
+            self.target_norm = None
+            self.criterion = nn.MSELoss()
         self.best_val_loss = float("inf")
         self.patience_counter = 0
         self.global_step = 0
@@ -722,6 +732,11 @@ class SolitireEndToEndValueTrainer:
                 indexes = indexes.to(self.device)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     outputs = self.compiled_model(indexes)
+
+                if self.target_norm is not None:
+                    mu, sigma = self.target_norm
+                    scores = (scores - mu) / sigma
+                    outputs = (outputs - mu) / sigma
                 loss = self.criterion(outputs.float(), scores)
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -775,6 +790,10 @@ class SolitireEndToEndValueTrainer:
                 indexes = indexes.to(self.device)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     outputs = self.compiled_model(indexes)
+                if self.target_norm is not None:
+                    mu, sigma = self.target_norm
+                    scores = (scores - mu) / sigma
+                    outputs = (outputs - mu) / sigma
                 loss = self.criterion(outputs.float(), scores)
                 val_loss += loss.item()
 
