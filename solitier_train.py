@@ -74,12 +74,12 @@ class SolitireMAETrainer:
         log_basename += f"_ld{model_params['latent_dim']}"
         log_basename += f"_mr{model_params['mask_ratio']:0.2f}"
         if "balanced_sampler" in model_params and model_params["balanced_sampler"]:
-            log_basename += f"_bs"
+            log_basename += "_bs"
         if (
             "dir_stratified_sampler" in model_params
             and model_params["dir_stratified_sampler"]
         ):
-            log_basename += f"_dss"
+            log_basename += "_dss"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_basename += f"_{timestamp}"
         self.log_path = os.path.join(
@@ -269,12 +269,12 @@ class SolitireMAEClassifyTrainer:
         log_basename += f"_ld{model_params['latent_dim']}"
         log_basename += f"_mr{model_params['mask_ratio']:0.2f}"
         if "balanced_sampler" in model_params and model_params["balanced_sampler"]:
-            log_basename += f"_bs"
+            log_basename += "_bs"
         if (
             "dir_stratified_sampler" in model_params
             and model_params["dir_stratified_sampler"]
         ):
-            log_basename += f"_dss"
+            log_basename += "_dss"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_basename += f"_{timestamp}"
         self.log_path = os.path.join(
@@ -328,7 +328,7 @@ class SolitireMAEClassifyTrainer:
                 wandb.log(
                     {"scheduler_lr": current_lr, "global_step": self.global_step},
                 )
-                indexes, _ = batch
+                indexes, _, _ = batch
                 indexes = indexes.to(self.device)
                 inputs = self.model.embeddings(indexes)
                 normal_token_mask = indexes < SPECIAL_TOKEN_BEGIN
@@ -344,8 +344,8 @@ class SolitireMAEClassifyTrainer:
                 # それ以外（unmasked / 特殊トークン）は ignore_index に設定
                 targets = indexes.clone()
                 assert targets.dtype == torch.long
-                loss_mask = mask & normal_token_mask  # 既存の2条件
-                targets[~loss_mask] = self.ignore_idx
+                # loss_mask = mask & normal_token_mask  # 既存の2条件
+                # targets[~loss_mask] = self.ignore_idx
 
                 # (B, L, C)→(B*L, C) と (B, L)→(B*L)
                 loss = self.criterion(
@@ -394,7 +394,7 @@ class SolitireMAEClassifyTrainer:
             else:
                 pbar = val_dataloader
             for batch in pbar:
-                indexes, _ = batch
+                indexes, _, _ = batch
                 indexes = indexes.to(self.device)
                 inputs = self.model.embeddings(indexes)
                 normal_token_mask = indexes < SPECIAL_TOKEN_BEGIN
@@ -409,8 +409,8 @@ class SolitireMAEClassifyTrainer:
                 # 損失は「通常トークン かつ マスク位置」のみ
                 # それ以外（unmasked / 特殊トークン）は ignore_index に設定
                 targets = indexes.clone()
-                loss_mask = mask & normal_token_mask  # 既存の2条件
-                targets[~loss_mask] = self.ignore_idx
+                # loss_mask = mask & normal_token_mask  # 既存の2条件
+                # targets[~loss_mask] = self.ignore_idx
 
                 # (B, L, C)→(B*L, C) と (B, L)→(B*L)
                 loss = self.criterion(
@@ -468,15 +468,17 @@ class SolitireValueTrainer:
         log_basename += f"_l{model_params['num_layer']}"
         log_basename += f"_h{model_params['num_heads']}"
         log_basename += f"_n{model_params['seq_len']}"
-        log_basename += f"_cb{model_params['complete_bonus']:0.2f}"
+        log_basename += f"_cb{model_params['score_args']['complete_bonus']:0.2f}"
         log_basename += f"_scr{model_params['source_complete_rate']:0.4f}"
         if "balanced_sampler" in model_params and model_params["balanced_sampler"]:
-            log_basename += f"_bs"
+            log_basename += "_bs"
         if (
             "dir_stratified_sampler" in model_params
             and model_params["dir_stratified_sampler"]
         ):
-            log_basename += f"_dss"
+            log_basename += "_dss"
+        if model_params["score_args"].get("is_delta", False):
+            log_basename += "_dl"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_basename += f"_{timestamp}"
         self.log_path = os.path.join(
@@ -528,7 +530,7 @@ class SolitireValueTrainer:
                 wandb.log(
                     {"scheduler_lr": current_lr, "global_step": self.global_step},
                 )
-                indexes, scores = batch
+                indexes, scores, _ = batch
                 scores = scores.to(self.device)
                 indexes = indexes.to(self.device)
                 inputs = self.ae_model.embeddings(indexes)
@@ -584,7 +586,7 @@ class SolitireValueTrainer:
             else:
                 pbar = val_dataloader
             for batch in pbar:
-                indexes, scores = batch
+                indexes, scores, _ = batch
                 scores = scores.to(self.device)
                 indexes = indexes.to(self.device)
                 inputs = self.ae_model.embeddings(indexes)
@@ -653,15 +655,17 @@ class SolitireEndToEndValueTrainer:
         log_basename += f"_l{model_params['num_layer']}"
         log_basename += f"_h{model_params['num_heads']}"
         log_basename += f"_n{model_params['seq_len']}"
-        log_basename += f"_cb{model_params['complete_bonus']:0.2f}"
+        log_basename += f"_cb{model_params['score_args']['complete_bonus']:0.2f}"
         log_basename += f"_scr{model_params['source_complete_rate']:0.4f}"
         if "balanced_sampler" in model_params and model_params["balanced_sampler"]:
-            log_basename += f"_bs"
+            log_basename += "_bs"
         if (
             "dir_stratified_sampler" in model_params
             and model_params["dir_stratified_sampler"]
         ):
-            log_basename += f"_dss"
+            log_basename += "_dss"
+        if model_params["score_args"].get("is_delta", False):
+            log_basename += "_dl"
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         log_basename += f"_{timestamp}"
         self.log_path = os.path.join(

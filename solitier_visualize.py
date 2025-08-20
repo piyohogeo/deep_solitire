@@ -743,26 +743,26 @@ class SolitireGameVisualizer:
                     print(f"Valid From Positions: {valid_from_positions}")
                     for valid_from_position in valid_from_positions:
                         self.select_from_position(valid_from_position)
-                    st_time = time.time_ns()
-                    valid_moves = self.game.enumerate_valid_moves_excluding_same_state()
-                    uncertain_states = {
-                        from_to_position: self.game.state.move_uncertain_states(
-                            *from_to_position
-                        )
-                        for from_to_position in valid_moves
-                    }
-                    ed_time = time.time_ns()
-                    print(
-                        f"Uncertain States Time: {(ed_time - st_time) * 1e-9:.2f} seconds"
-                    )
-                    st_time = time.time_ns()
-                    uncertain_states_count = {
-                        from_to_position: len(states)
-                        for from_to_position, states in uncertain_states.items()
-                    }
-                    sum_uncertain_states_count = sum(uncertain_states_count.values())
-                    print(f"Uncertain States: {uncertain_states_count}")
-                    print(f"Sum of Uncertain States: {sum_uncertain_states_count}")
+                    # st_time = time.time_ns()
+                    # valid_moves = self.game.enumerate_valid_moves_excluding_same_state()
+                    # uncertain_states = {
+                    #    from_to_position: self.game.state.move_uncertain_states(
+                    #        *from_to_position
+                    #    )
+                    #    for from_to_position in valid_moves
+                    # }
+                    # ed_time = time.time_ns()
+                    # print(
+                    #    f"Uncertain States Time: {(ed_time - st_time) * 1e-9:.2f} seconds"
+                    # )
+                    # st_time = time.time_ns()
+                    # uncertain_states_count = {
+                    #    from_to_position: len(states)
+                    #    for from_to_position, states in uncertain_states.items()
+                    # }
+                    # sum_uncertain_states_count = sum(uncertain_states_count.values())
+                    # print(f"Uncertain States: {uncertain_states_count}")
+                    # print(f"Sum of Uncertain States: {sum_uncertain_states_count}")
 
             self.visualize()
             screen.fill(background_color)

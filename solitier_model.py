@@ -669,12 +669,17 @@ class SolitireEndToEndValueModel(nn.Module):
         return (target, attentions) if is_return_attention else target
 
     @classmethod
-    def load_from_file(cls, path, prefix="best_"):
+    def load_from_file_and_model_params(cls, path, prefix="best_"):
         with open(os.path.join(path, f"{prefix}model_params.json"), "r") as f:
             model_params = json.load(f)
         filtered_model_params = filter_kwargs_for_function(cls.__init__, model_params)
         model = cls(**filtered_model_params)
         model.load_state_dict(torch.load(os.path.join(path, f"{prefix}model.pth")))
+        return model, model_params
+
+    @classmethod
+    def load_from_file(cls, path, prefix="best_"):
+        model, _ = cls.load_from_file_and_model_params(path, prefix=prefix)
         return model
 
     def save_to_file(self, path, model_params, prefix=""):

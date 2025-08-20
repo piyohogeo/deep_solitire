@@ -7,7 +7,7 @@ import os
 import pickle
 import random
 from functools import partial
-from typing import List, Sequence
+from typing import List, Optional, Sequence
 
 import numpy as np
 import torch
@@ -16,22 +16,80 @@ from solitier_token import state_to_token_indices
 from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 from tqdm import tqdm
 
+DEFAULT_SCORE_ARGS = {
+    "complete_bonus": 10.0,
+    "gamma": 0.99,
+    "is_delta": False,
+    "w_open": 0.05,  # 開札の増分に対する重み
+    "w_foundation": 0.20,  # Foundationに積んだ増分に対する重み
+    "penalty_stagnation": -0.01,  # 進捗なし（開札/基礎増分ゼロ）の微ペナルティ
+    "penalty_stock_cycle": -0.02,  # ストックを1巡させたときの微ペナルティ
+}
 
-def score_game(game: SolitireGame, complete_bonus: float = 10.0) -> float:
+
+def score_game(game: SolitireGame, score_args: dict) -> float:
     """
     Calculate the score of the current state.
     The score is the number of cards plus bonus for completing the game.
     """
     score = 0.0
     if game.state.is_all_open():
-        score += complete_bonus
+        score += score_args["complete_bonus"]
     score += game.state.open_count() * 0.1
     # discount the score by the number of moves
     return score
 
 
+# 新: 各遷移 t->t+1 の報酬 r_t を返す
+def score_game_deltas(game: SolitireGame, score_args: dict) -> list[float]:
+    """
+    各遷移の差分報酬列 r_t を返す。
+    - Δopen = open_count(s_{t+1}) - open_count(s_t)
+    - Δfound = foundation 枚数の増分（open_count に現れない「基礎に積むだけ」の行為も加点）
+    - 進捗ゼロやストック巡回に微ペナルティ
+    - クリア時は最終遷移に complete_bonus を付与
+    """
+    states = game.states
+    if len(states) < 2:
+        return []
+
+    def opened_cards(st):  # 開いているカード総数（既存の open_count と同義）
+        return st.open_count()
+
+    def foundation_cards(st):  # Foundation 上の枚数合計
+        # state.foundation は {Suit: list[CardState]} の辞書
+        return sum(len(lst) for lst in st.foundation.values())
+
+    rewards: list[float] = []
+    for t in range(len(states) - 1):
+        s, sp = states[t], states[t + 1]
+        r = 0.0
+
+        # 1) 開札増分（裏がめくれたときに効く）
+        r += score_args["w_open"] * (opened_cards(sp) - opened_cards(s))
+
+        # 2) Foundation 増分（開札枚数が変わらなくても、基礎に積む価値を加点）
+        r += score_args["w_foundation"] * (foundation_cards(sp) - foundation_cards(s))
+
+        # 3) 進捗なしの微ペナルティ
+        if r == 0.0:
+            r += score_args["penalty_stagnation"]
+
+        # 4) ストック巡回の微ペナルティ（在庫を戻すだけの手を少しだけ嫌う）
+        if sp.stock_cycle_count > s.stock_cycle_count:
+            r += score_args["penalty_stock_cycle"]
+
+        rewards.append(r)
+
+    # 5) 完了ボーナス（最終遷移に付与）
+    if game.state.is_all_open() and rewards:
+        rewards[-1] += score_args["complete_bonus"]
+
+    return rewards
+
+
 def build_training_data(
-    path: str, gamma: float = 0.99, complete_bonus: float = 10.0
+    path: str, score_args: dict
 ) -> tuple[list[tuple[np.ndarray, float]], bool]:
     try:
         gc.disable()  # Disable garbage collection for performance
@@ -41,13 +99,50 @@ def build_training_data(
         return ([], False)
     finally:
         gc.enable()
-    score = score_game(game, complete_bonus=complete_bonus)
-    discounted = [score * (gamma**i) for i in reversed(range(len(game.states)))]
+    score = score_game(game, score_args=score_args)
+    discounted = [
+        score * (score_args["gamma"] ** i) for i in reversed(range(len(game.states)))
+    ]
     is_complete = game.state.is_all_open()
     tokenized = [
         np.array(state_to_token_indices(s), dtype=np.uint8) for s in game.states
     ]
     return (list(zip(tokenized, discounted)), is_complete)
+
+
+def build_training_data_deltas(
+    path: str, score_args: dict
+) -> tuple[list[tuple[np.ndarray, float]], bool]:
+    try:
+        gc.disable()
+        game = SolitireGame.load_from_file(path)
+    except (EOFError, pickle.UnpicklingError, OSError) as e:
+        print(f"Error loading game from {path}: {e}")
+        return ([], False)
+    finally:
+        gc.enable()
+
+    # 変更点: 各遷移の報酬列 r_t を作る
+    rewards = score_game_deltas(game, score_args=score_args)
+
+    # r_t から G_t = r_t + γ G_{t+1} を後ろから累積（長さ: len(states)-1）
+    returns: list[float] = []
+    G = 0.0
+    for r in reversed(rewards):
+        G = r + score_args["gamma"] * G
+        returns.append(G)
+    returns.reverse()
+
+    # 学習ターゲットは「状態 t の価値 = G_t」。
+    # 終端状態（最後の state）はこれ以上の手がないため 0 を割り当てて揃える。
+    targets = returns + [0.0]
+
+    tokenized = [
+        np.array(state_to_token_indices(s), dtype=np.uint8) for s in game.states
+    ]
+    token_scores = list(zip(tokenized, targets))
+    is_complete = game.state.is_all_open()
+    return (token_scores, is_complete)
 
 
 def flatten(xss, ys):
@@ -56,8 +151,13 @@ def flatten(xss, ys):
             yield x, y
 
 
-def load_all(pickled_game_paths, gamma=0.99, complete_bonus=10.0):
-    worker = partial(build_training_data, gamma=gamma, complete_bonus=complete_bonus)
+def load_all(
+    pickled_game_paths, score_args: dict
+) -> tuple[list[list[tuple[np.ndarray, float]]], list[bool]]:
+    if score_args["is_delta"]:
+        worker = partial(build_training_data_deltas, score_args=score_args)
+    else:
+        worker = partial(build_training_data, score_args=score_args)
     with mp.Pool(mp.cpu_count()) as pool:
         # 進捗を逐次出したいなら imap_unordered
         per_game = list(
@@ -89,17 +189,30 @@ class SolitireTokenScoresDirectoryCache:
     def __init__(
         self,
         directory: str,
-        complete_bonus: float = 10.0,
+        score_args: dict,
         is_skip_hash_check: bool = False,
     ):
         self.directory = directory
+        self.score_args = score_args
         paths = glob.glob(os.path.join(directory, "*.pickle"))
         filenames = [extract_filename(p) for p in paths]
         filenames.sort()  # Ensure consistent order
         self.hash = hash_string_list(filenames)
-        cache_path = os.path.join(
-            directory, f"token_scores_cb{complete_bonus:.1f}.cache"
-        )
+        if score_args["is_delta"]:
+            filename = f"token_scores_cb{score_args['complete_bonus']:.1f}"
+            filename += f"_dl_gm{score_args['gamma']:.2f}"
+            filename += f"_wo{score_args['w_open']:.2f}"
+            filename += f"_wf{score_args['w_foundation']:.2f}"
+            filename += f"_psta{score_args['penalty_stagnation']:.2f}"
+            filename += f"_psto{score_args['penalty_stock_cycle']:.2f}.cache"
+            cache_path = os.path.join(
+                directory,
+                filename,
+            )
+        else:
+            cache_path = os.path.join(
+                directory, f"token_scores_cb{score_args['complete_bonus']:.1f}.cache"
+            )
         if os.path.exists(cache_path):
             try:
                 gc.disable()  # Disable garbage collection for performance
@@ -112,7 +225,7 @@ class SolitireTokenScoresDirectoryCache:
         if token_scores_cache is None or (
             token_scores_cache["hash"] != self.hash and not is_skip_hash_check
         ):
-            token_scoress, is_completes = load_all(paths, complete_bonus=complete_bonus)
+            token_scoress, is_completes = load_all(paths, score_args=score_args)
             self.token_scores = {
                 filename: (token_scores, is_complete)
                 for filename, (token_scores, is_complete) in zip(
@@ -135,10 +248,12 @@ class SolitireTokenScoresDirectoryCache:
 class SolitireDataset(Dataset):
     @classmethod
     def load_from_paths(
-        cls, pickled_game_paths: list[str], complete_bonus: float = 10.0
+        cls,
+        pickled_game_paths: list[str],
+        score_args: dict,
     ):
         # build parallel data loading
-        data, is_completes = load_all(pickled_game_paths, complete_bonus=complete_bonus)
+        data, is_completes = load_all(pickled_game_paths, score_args=score_args)
         return cls(data, is_completes)
 
     @classmethod
@@ -152,7 +267,7 @@ class SolitireDataset(Dataset):
             for filename in filenames
             if filename in directory_cache.token_scores
         ]
-        token_scores = (x[0] for x in token_scores_is_completes)
+        token_scores = [x[0] for x in token_scores_is_completes]
         is_completes = [x[1] for x in token_scores_is_completes]
 
         return cls(token_scores, is_completes)
@@ -162,15 +277,15 @@ class SolitireDataset(Dataset):
         cls,
         directory: str,
         filenames: list[str],
-        complete_bonus: float = 10.0,
+        score_args: dict,
         is_skip_hash_check: bool = False,
     ):
         cache = SolitireTokenScoresDirectoryCache(
             directory,
-            complete_bonus=complete_bonus,
+            score_args=score_args,
             is_skip_hash_check=is_skip_hash_check,
         )
-        return cls.load_from_diretory_cache(
+        return cls.load_from_directory_cache(
             cache,
             filenames,
         )
@@ -198,25 +313,29 @@ class SolitireDataset(Dataset):
 
 def load_caches_from_directories(
     directories: list[str],
-    complete_bonus: float = 10.0,
-) -> list[SolitireTokenScoresDirectoryCache]:
+    score_args: Optional[dict] = None,
+):
+    if score_args is None:
+        score_args = DEFAULT_SCORE_ARGS
     for directory in directories:
         print(f"Loading cache from {directory}...")
         _ = SolitireTokenScoresDirectoryCache(
             directory,
-            complete_bonus=complete_bonus,
+            score_args=score_args,
         )
 
 
 def load_solitire_dataset(
     directories: list[str],
-    complete_bonus: float = 10.0,
+    score_args: Optional[dict] = None,
     train_ratio: float = 0.9,
     is_skip_hash_check: bool = False,
-) -> tuple[Dataset, Dataset, int, list[bool]]:
+) -> tuple[Dataset, Dataset, int, list[bool], list[int], list[float]]:
     """
     Load a Solitire dataset from a directory with specified filenames.
     """
+    if score_args is None:
+        score_args = DEFAULT_SCORE_ARGS
     train_datasets = []
     val_datasets = []
     train_dataset_lengths = []
@@ -227,7 +346,7 @@ def load_solitire_dataset(
         print(f"Loading dataset from {directory}...")
         cache = SolitireTokenScoresDirectoryCache(
             directory,
-            complete_bonus=complete_bonus,
+            score_args=score_args,
             is_skip_hash_check=is_skip_hash_check,
         )
         filenames = cache.get_filenames()
@@ -337,10 +456,14 @@ def load_solitire_balanced_dataloader(
     train_ratio: float = 0.9,
     is_skip_hash_check: bool = False,
     num_workers: int = 8,
+    score_args: Optional[dict] = None,
 ) -> tuple[DataLoader, DataLoader, int, float]:
+    if score_args is None:
+        score_args = DEFAULT_SCORE_ARGS
     train_dataset, val_dataset, total_train_size, is_completes, _, _ = (
         load_solitire_dataset(
             directories,
+            score_args=score_args,
             train_ratio=train_ratio,
             is_skip_hash_check=is_skip_hash_check,
         )
@@ -639,7 +762,10 @@ def load_solitire_dir_stratified_dataloader(
     train_ratio: float = 0.9,
     is_skip_hash_check: bool = False,
     num_workers: int = 8,
+    score_args: Optional[dict] = None,
 ) -> tuple[DataLoader, DataLoader, int, float]:
+    if score_args is None:
+        score_args = DEFAULT_SCORE_ARGS
     (
         train_dataset,
         val_dataset,
@@ -649,6 +775,7 @@ def load_solitire_dir_stratified_dataloader(
         complete_rates,
     ) = load_solitire_dataset(
         directories,
+        score_args=score_args,
         train_ratio=train_ratio,
         is_skip_hash_check=is_skip_hash_check,
     )

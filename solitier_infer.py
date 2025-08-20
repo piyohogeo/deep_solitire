@@ -5,6 +5,7 @@ import random
 from typing import Optional, Tuple
 
 import torch
+from solitier_dataset import DEFAULT_SCORE_ARGS
 from solitier_game import (
     SolitireCardPositionFrom,
     SolitireCardPositionTo,
@@ -117,10 +118,13 @@ async def estimate_move_of_game(
     executor: SolitireValueExecuter,
     epsilon: float = 0.0,
     is_verbose: bool = False,
+    score_args: Optional[dict] = None,
 ) -> Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
     """
     Estimate the value of the next move in the game using the provided executer.
     """
+    if score_args is None:
+        score_args = DEFAULT_SCORE_ARGS
     moves = game.enumerate_valid_moves_excluding_same_state()
     if not moves:
         if is_verbose:
@@ -142,11 +146,41 @@ async def estimate_move_of_game(
     execute_states = [state for move, state in flattened_states]
 
     values = await executor.execute(execute_states)
+
+    base = game.state  # 現在の状態 s
+
+    def opened_cards(st):
+        return st.open_count()
+
+    def foundation_cards(st):
+        return sum(len(v) for v in st.foundation.values())
+
+    base_open = opened_cards(base)
+    base_found = foundation_cards(base)
+    base_stock = base.stock_cycle_count
+
     value_map = {}
-    for (move, state), value in zip(flattened_states, values):
+    for (move, sp), v in zip(flattened_states, values):
+        if score_args["is_delta"]:
+            # 即時報酬 r(s→s') を学習時と同じ定義で
+            sp_open = opened_cards(sp)
+            sp_found = foundation_cards(sp)
+            d_open, d_found = sp_open - base_open, sp_found - base_found
+            r = score_args["w_open"] * d_open
+            r += score_args["w_foundation"] * d_found
+            if score_args["penalty_stagnation"] != 0.0 and (
+                opened_cards(sp) == base_open and foundation_cards(sp) == base_found
+            ):
+                r += score_args["penalty_stagnation"]
+            if sp.stock_cycle_count > base_stock:
+                r += score_args["penalty_stock_cycle"]
+            q = r + score_args["gamma"] * v
+        else:
+            q = v  # 旧方式（互換用）
+
         if move not in value_map:
             value_map[move] = []
-        value_map[move].append(value)
+        value_map[move].append(q)
     move_values = {
         move: sum(values) / len(values) for move, values in value_map.items()
     }
@@ -162,13 +196,18 @@ async def play_game_with_executor(
     max_moves: int = 200,
     epsilon: float = 0.0,
     is_verbose: bool = False,
+    score_args: Optional[dict] = None,
 ) -> bool:
     """
     Play the game using the executor to estimate the best moves.
     """
     for i in range(max_moves):
         move = await estimate_move_of_game(
-            game, executor, epsilon=epsilon, is_verbose=is_verbose
+            game,
+            executor,
+            epsilon=epsilon,
+            is_verbose=is_verbose,
+            score_args=score_args,
         )
         if move is None:
             if is_verbose:
@@ -200,13 +239,19 @@ async def loop_log_play_game_with_executor(
     max_moves: int = 200,
     epsilon: float = 0.0,
     is_verbose: bool = False,
+    score_args: Optional[dict] = None,
 ) -> None:
     path = os.path.join(log_dir, model_name)
     os.makedirs(path, exist_ok=True)
     while True:
         game = SolitireGame()
         is_successed = await play_game_with_executor(
-            game, executor, epsilon=epsilon, max_moves=max_moves, is_verbose=is_verbose
+            game,
+            executor,
+            epsilon=epsilon,
+            max_moves=max_moves,
+            is_verbose=is_verbose,
+            score_args=score_args,
         )
         filename = os.path.join(path, create_datetime_str() + ".pickle")
         game.save_to_file(filename)
@@ -222,6 +267,7 @@ def batched_loop_log_play_game(
     max_moves: int = 200,
     epsilon: float = 0.0,
     is_verbose: bool = False,
+    score_args: Optional[dict] = None,
 ) -> None:
     executor = SolitireValueBatchedExecuter(model, batch_size=batch_size)
     executor.start()
@@ -233,6 +279,7 @@ def batched_loop_log_play_game(
                 log_dir=log_dir,
                 max_moves=max_moves,
                 epsilon=epsilon,
+                score_args=score_args,
                 is_verbose=is_verbose,
             )
         )
