@@ -3,7 +3,7 @@ import datetime
 import math
 import os
 import random
-from typing import Optional, Tuple
+from typing import Awaitable, Callable, Optional, Tuple, Union
 
 import torch
 from solitier_dataset import DEFAULT_SCORE_ARGS
@@ -13,8 +13,23 @@ from solitier_game import (
     SolitireGame,
     SolitireState,
 )
+from solitier_game_lw import SolitireLightWeightState
 from solitier_model import SolitireAbstractEndToEndValueModel
 from solitier_token import state_to_token_indices
+
+AbstractSolitireState = Union[SolitireState, SolitireLightWeightState]
+
+
+def abstract_solitire_state_to_token_indices(
+    state: AbstractSolitireState,
+) -> list[int]:
+    match state:
+        case SolitireState():
+            return state_to_token_indices(state)
+        case SolitireLightWeightState():
+            return state.to_token_indices()
+        case _:
+            raise ValueError("Unsupported state type")
 
 
 class SolitireValueExecuter:
@@ -24,11 +39,13 @@ class SolitireValueExecuter:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
 
-    async def execute(self, states: list[SolitireState]) -> list[float]:
+    async def execute(self, states: list[AbstractSolitireState]) -> list[float]:
         """
         Execute the value model on the given states.
         """
-        token_indices = [state_to_token_indices(state) for state in states]
+        token_indices = [
+            abstract_solitire_state_to_token_indices(state) for state in states
+        ]
         token_indices_tensor = torch.tensor(token_indices, dtype=torch.long)
         token_indices_tensor = token_indices_tensor.to(self.device)
         # print("Executing model on states:", token_indices_tensor.shape)
@@ -56,18 +73,18 @@ class SolitireValueBatchedExecuter:
         """
         self.worker_task = asyncio.create_task(self.worker())
 
-    async def execute_state(self, state: SolitireState) -> float:
+    async def execute_state(self, state: AbstractSolitireState) -> float:
         """
         Execute the value model on a single state.
         """
-        token_indices = state_to_token_indices(state)
+        token_indices = abstract_solitire_state_to_token_indices(state)
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
         self.result_futures[id(state)] = fut
         await self.job_queue.put((id(state), token_indices))
         return await fut
 
-    async def execute(self, states: list[SolitireState]) -> list[float]:
+    async def execute(self, states: list[AbstractSolitireState]) -> list[float]:
         """
         Execute the value model on the given states.
         """
@@ -114,20 +131,29 @@ class SolitireValueBatchedExecuter:
                 self.result_futures.pop(job_id).set_result(output)
 
 
+AbstractSolitireValueExecutor = Union[
+    SolitireValueExecuter, SolitireValueBatchedExecuter
+]
+
+
 async def estimate_move_of_game(
     game: SolitireGame,
-    executor: SolitireValueExecuter,
+    executor: AbstractSolitireValueExecutor,
     epsilon: float = 0.0,
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
     cvar_alpha: Optional[float] = None,
+    is_allow_same_state: bool = False,
 ) -> Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
     """
     Estimate the value of the next move in the game using the provided executer.
     """
     if score_args is None:
         score_args = DEFAULT_SCORE_ARGS
-    moves = game.enumerate_valid_moves_excluding_same_state()
+    if not is_allow_same_state:
+        moves = game.enumerate_valid_moves_excluding_same_state()
+    else:
+        moves = game.state.enumerate_valid_moves()
     if not moves:
         if is_verbose:
             print("No valid moves available.")
@@ -201,26 +227,22 @@ async def estimate_move_of_game(
     return best_move
 
 
-async def play_game_with_executor(
+async def play_game_with_move_estimator(
     game: SolitireGame,
-    executor: SolitireValueExecuter,
+    estimate_move: Callable[
+        [SolitireGame],
+        Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]],
+    ],
     max_moves: int = 200,
     epsilon: float = 0.0,
     is_verbose: bool = False,
-    score_args: Optional[dict] = None,
-    cvar_alpha: Optional[float] = None,
 ) -> bool:
     """
     Play the game using the executor to estimate the best moves.
     """
     for i in range(max_moves):
-        move = await estimate_move_of_game(
+        move = await estimate_move(
             game,
-            executor,
-            epsilon=epsilon,
-            is_verbose=is_verbose,
-            score_args=score_args,
-            cvar_alpha=cvar_alpha,
         )
         if move is None:
             if is_verbose:
@@ -228,7 +250,7 @@ async def play_game_with_executor(
             return False
         if is_verbose:
             print(f"Executing move[{i}]: {move}")
-        is_moved = game.checked_move_excluding_same_state(*move)
+        is_moved = game.checked_move(*move)
         if game.state.is_all_open():
             if is_verbose:
                 print(f"Game completed in {i} moves.")
@@ -240,13 +262,83 @@ async def play_game_with_executor(
     return False  # Game did not complete within max_moves
 
 
+async def play_game_with_executor(
+    game: SolitireGame,
+    executor: SolitireValueExecuter,
+    max_moves: int = 200,
+    epsilon: float = 0.0,
+    is_verbose: bool = False,
+    score_args: Optional[dict] = None,
+    cvar_alpha: Optional[float] = None,
+    is_allow_same_state: bool = False,
+) -> bool:
+    """
+    Play the game using the executor to estimate the best moves.
+    """
+
+    async def estimate_move(
+        game: SolitireGame,
+    ) -> Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]:
+        return estimate_move_of_game(
+            game,
+            executor,
+            epsilon=epsilon,
+            is_verbose=is_verbose,
+            score_args=score_args,
+            cvar_alpha=cvar_alpha,
+            is_allow_same_state=is_allow_same_state,
+        )
+
+    return await play_game_with_move_estimator(
+        game,
+        estimate_move,
+        max_moves=max_moves,
+        epsilon=epsilon,
+        is_verbose=is_verbose,
+    )
+
+
 def create_datetime_str():
     date = datetime.datetime.now()
     return "{0:%Y%m%d%H%M%S_%f}".format(date)
 
 
+async def loop_log_play_game_by_move_estimator(
+    move_estimate: Callable[
+        [SolitireGame],
+        Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]],
+    ],
+    model_name: str,
+    log_dir: str = r"/mnt/c/log/solitire/generated_log",
+    max_moves: int = 200,
+    epsilon: float = 0.0,
+    is_verbose: bool = False,
+    post_fix: str = "",
+) -> None:
+    path = os.path.join(log_dir, model_name)
+    if cvar_alpha is not None:
+        path += f"_cvar{cvar_alpha:.2f}"
+    if is_allow_same_state:
+        path += "_ss"
+    path += post_fix
+    os.makedirs(path, exist_ok=True)
+    while True:
+        game = SolitireGame()
+        is_successed = await play_game_with_move_estimator(
+            game,
+            move_estimate,
+            max_moves=max_moves,
+            epsilon=epsilon,
+            is_verbose=is_verbose,
+        )
+        filename = os.path.join(path, create_datetime_str() + ".pickle")
+        game.save_to_file(filename)
+        open_count = game.state.open_count()
+        print(is_successed, open_count)
+
+
 async def loop_log_play_game_with_executor(
-    executor: SolitireValueExecuter,
+    executor: AbstractSolitireValueExecutor,
     model_name: str,
     log_dir: str = r"/mnt/c/log/solitire/generated_log",
     max_moves: int = 200,
@@ -254,26 +346,30 @@ async def loop_log_play_game_with_executor(
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
     cvar_alpha: Optional[float] = None,
+    is_allow_same_state: bool = False,
 ) -> None:
-    path = os.path.join(log_dir, model_name)
-    if cvar_alpha is not None:
-        path += f"_cvar{cvar_alpha:.2f}"
-    os.makedirs(path, exist_ok=True)
-    while True:
-        game = SolitireGame()
-        is_successed = await play_game_with_executor(
+    async def estimate_move(
+        game: SolitireGame,
+    ) -> Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]:
+        return estimate_move_of_game(
             game,
             executor,
             epsilon=epsilon,
-            max_moves=max_moves,
             is_verbose=is_verbose,
             score_args=score_args,
             cvar_alpha=cvar_alpha,
+            is_allow_same_state=is_allow_same_state,
         )
-        filename = os.path.join(path, create_datetime_str() + ".pickle")
-        game.save_to_file(filename)
-        open_count = game.state.open_count()
-        print(is_successed, open_count)
+
+    return await loop_log_play_game_by_move_estimator(
+        estimate_move,
+        model_name=model_name,
+        log_dir=log_dir,
+        max_moves=max_moves,
+        epsilon=epsilon,
+        is_verbose=is_verbose,
+        post_fix="",
+    )
 
 
 def batched_loop_log_play_game(
@@ -286,6 +382,7 @@ def batched_loop_log_play_game(
     is_verbose: bool = False,
     score_args: Optional[dict] = None,
     cvar_alpha: Optional[float] = None,
+    is_allow_same_state: bool = False,
 ) -> None:
     executor = SolitireValueBatchedExecuter(model, batch_size=batch_size)
     executor.start()
@@ -300,5 +397,6 @@ def batched_loop_log_play_game(
                 score_args=score_args,
                 is_verbose=is_verbose,
                 cvar_alpha=cvar_alpha,
+                is_allow_same_state=is_allow_same_state,
             )
         )

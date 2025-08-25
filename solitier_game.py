@@ -1,4 +1,5 @@
 import copy
+import gc
 import pickle
 import random
 from collections import deque
@@ -18,6 +19,14 @@ class Suit(Enum):
 
     def __repr__(self):
         return self.name
+
+    def invert_color_suits(self):
+        if self == Suit.C or self == Suit.S:
+            return [Suit.D, Suit.H]
+        elif self == Suit.D or self == Suit.H:
+            return [Suit.C, Suit.S]
+        else:
+            raise ValueError(f"Unknown suit: {self}")
 
 
 @dataclass(frozen=True)
@@ -568,6 +577,19 @@ class SolitireGame:
     def is_success(self) -> bool:
         return self.state.is_all_open()
 
+    def move(
+        self,
+        from_position: SolitireCardPositionFrom,
+        to_position: SolitireCardPositionTo,
+    ) -> bool:
+        new_state = self.state.move(from_position, to_position)
+        if new_state is None:
+            return False
+        self.states.append(new_state)
+        self.state = new_state
+        self.moves.append((from_position, to_position))
+        return True
+
     def checked_move(
         self,
         from_position: SolitireCardPositionFrom,
@@ -629,6 +651,12 @@ class SolitireGame:
         valid_positions = self.enumerate_valid_moves_excluding_same_state()
         return list(set(from_position for from_position, _ in valid_positions))
 
+    def is_all_open(self) -> bool:
+        return self.state.is_all_open()
+
+    def open_count(self) -> int:
+        return self.state.open_count()
+
     def _deduplicate_first_same_states(self):
         for i, state in enumerate(self.states):
             for j, followed_state in enumerate(self.states[i + 1 :], start=i + 1):
@@ -662,7 +690,11 @@ class SolitireGame:
     @classmethod
     def load_from_file(cls, filename: str) -> "SolitireGame":
         with open(filename, "rb") as f:
-            game = pickle.load(f)
+            try:
+                gc.disable()  # Disable garbage collection for performance
+                game = pickle.load(f)
+            finally:
+                gc.enable()
             if not isinstance(game, SolitireGame):
                 raise ValueError(f"Expected SolitireGame, got {type(game)}")
             return game

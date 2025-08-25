@@ -1,0 +1,605 @@
+import copy
+from typing import List, Tuple
+
+from pyrsistent import plist, pset
+from solitier_game import (
+    Card,
+    FromFoundation,
+    FromPile,
+    SolitireCardPositionFrom,
+    SolitireCardPositionTo,
+    SolitireGame,
+    SolitireState,
+    Suit,
+    ToFoundation,
+    ToPile,
+)
+from solitier_token import (
+    Token,
+    TokenClose,
+    TokenClosedPile,
+    TokenClosedStock,
+    TokenCLS,
+    TokenEOS,
+    TokenFoundation,
+    TokenOpen,
+    TokenOpenedPile,
+    TokenOpenedStock,
+    TokenWaste,
+)
+
+
+class SolitireLightWeightState:
+    def __init__(self, state: SolitireState):
+        self._token_indices = None
+        self._hash_cache = None
+        self.waste_cards = [card_state.card for card_state in state.waste_stock]
+        self.foundation_counts = [0] * 4
+        for suit in state.foundation:
+            self.foundation_counts[suit.value] = len(state.foundation[suit])
+        self.closed_pile_counts = [
+            len([card_state.card for card_state in piles if not card_state.is_open])
+            for piles in state.piless
+        ]
+        self.opened_pile_cardss = []
+        for piles in state.piless:
+            self.opened_pile_cardss.append(
+                [card_state.card for card_state in piles if card_state.is_open]
+            )
+        self.closed_cards = []
+        for piles in state.piless:
+            self.closed_cards.extend(
+                [card_state.card for card_state in piles if not card_state.is_open]
+            )
+        if state.stock_cycle_count > 0:
+            self.opened_stock_cards = [card_state.card for card_state in state.stock]
+            self.closed_stock_counts = 0
+        else:
+            self.opened_stock_cards = []
+            self.closed_stock_counts = len(state.stock)
+            self.closed_cards.extend([card_state.card for card_state in state.stock])
+        self.closed_cards = pset(self.closed_cards)
+        self.stock_cycle_count = state.stock_cycle_count
+
+        # Card -> FromPosition のマッピング
+        self._card_from_positions = [None] * 52
+        if len(self.waste_cards) > 0:
+            self._set_card_from_position(self.waste_cards[-1], "FromWaste")
+        for suit_index, foundation_count in enumerate(self.foundation_counts):
+            if foundation_count > 0:
+                suit = Suit(suit_index)
+                self._set_card_from_position(
+                    Card(suit, foundation_count), FromFoundation(suit)
+                )
+        for col, (closed_pile_count, open_pile_cards) in enumerate(
+            zip(self.closed_pile_counts, self.opened_pile_cardss)
+        ):
+            for row, card in enumerate(open_pile_cards):
+                self._set_card_from_position(
+                    card, FromPile(col, row + closed_pile_count)
+                )
+
+    def _set_card_from_position(
+        self, card: Card, from_position: SolitireCardPositionFrom
+    ):
+        self._card_from_positions[card.suit.value * 13 + card.number - 1] = (
+            from_position
+        )
+
+    def _get_card_from_position(self, card: Card) -> SolitireCardPositionFrom:
+        return self._card_from_positions[card.suit.value * 13 + card.number - 1]
+
+    def enumerate_valid_moves(self) -> List[tuple[Card, SolitireCardPositionTo]]:
+        valid_moves = []
+        if (
+            len(self.opened_stock_cards) + self.closed_stock_counts > 0
+            or len(self.waste_cards) > 0
+        ):
+            valid_moves.append(("FromStock", "ToStock"))
+        # To Foundation
+        for suit_index, foundation_count in enumerate(self.foundation_counts):
+            suit = Suit(suit_index)
+            if foundation_count < 13:
+                card = Card(suit, foundation_count + 1)
+                from_position = self._get_card_from_position(card)
+                if from_position is not None:
+                    match from_position:
+                        case FromPile(col, row):
+                            if (
+                                row
+                                == self.closed_pile_counts[col]
+                                + len(self.opened_pile_cardss[col])
+                                - 1
+                            ):
+                                valid_moves.append((from_position, ToFoundation(suit)))
+                        case _:
+                            valid_moves.append((from_position, ToFoundation(suit)))
+        # Te Pile
+        for col, (closed_pile_count, open_pile_cards) in enumerate(
+            zip(self.closed_pile_counts, self.opened_pile_cardss)
+        ):
+            if len(open_pile_cards) > 0:
+                to_card = open_pile_cards[-1]
+                if to_card.number > 1:
+                    possible_from_cards = [
+                        Card(suit, to_card.number - 1)
+                        for suit in to_card.suit.invert_color_suits()
+                    ]
+                    for possible_from_card in possible_from_cards:
+                        from_position = self._get_card_from_position(possible_from_card)
+                        if from_position is not None:
+                            valid_moves.append((from_position, ToPile(col)))
+            else:
+                possible_from_cards = [Card(suit, 13) for suit in Suit]
+                for possible_from_card in possible_from_cards:
+                    from_position = self._get_card_from_position(possible_from_card)
+                    if from_position is not None:
+                        valid_moves.append((from_position, ToPile(col)))
+        return valid_moves
+
+    def _move_stock_to_stock(self) -> List["SolitireLightWeightState"]:
+        if len(self.opened_stock_cards) > 0:
+            new_state = self.copy()
+            if len(new_state.waste_cards) > 0:
+                new_state._set_card_from_position(new_state.waste_cards[-1], None)
+            new_state.waste_cards.append(new_state.opened_stock_cards.pop(0))
+            new_state._set_card_from_position(new_state.waste_cards[-1], "FromWaste")
+            return [new_state]
+        elif self.closed_stock_counts > 0:
+            new_states = []
+            for closed_card in self.closed_cards:
+                new_state = self.copy()
+                if len(new_state.waste_cards) > 0:
+                    new_state._set_card_from_position(new_state.waste_cards[-1], None)
+                new_state.waste_cards.append(closed_card)
+                new_state.closed_stock_counts -= 1
+                new_state.closed_cards = new_state.closed_cards.discard(closed_card)
+                new_state._set_card_from_position(
+                    new_state.waste_cards[-1], "FromWaste"
+                )
+                new_states.append(new_state)
+            return new_states
+        elif len(self.waste_cards) > 0:
+            new_state = self.copy()
+            new_state._set_card_from_position(new_state.waste_cards[-1], None)
+            new_state.opened_stock_cards = new_state.waste_cards
+            new_state.waste_cards = []
+            new_state.stock_cycle_count += 1
+            return new_state._move_stock_to_stock()
+        else:
+            return []
+
+    def _move_pile_to_pile(
+        self, from_pile: Tuple[int, int], to_col: int
+    ) -> List["SolitireLightWeightState"]:
+        from_col, from_row = from_pile
+        from_closed_pile_count = self.closed_pile_counts[from_col]
+        from_opened_row = from_row - from_closed_pile_count
+        from_opended_pile_move_cards = self.opened_pile_cardss[from_col][
+            from_opened_row:
+        ]
+
+        base_new_state = self.copy()
+        for card in from_opended_pile_move_cards:
+            base_new_state._set_card_from_position(card, None)
+        del base_new_state.opened_pile_cardss[from_col][from_opened_row:]
+        to_col_offset = self.closed_pile_counts[to_col] + len(
+            base_new_state.opened_pile_cardss[to_col]
+        )
+        base_new_state.opened_pile_cardss[to_col].extend(from_opended_pile_move_cards)
+        for i, card in enumerate(from_opended_pile_move_cards):
+            base_new_state._set_card_from_position(
+                card, FromPile(to_col, i + to_col_offset)
+            )
+
+        if from_opened_row == 0 and from_closed_pile_count > 0:
+            new_states = []
+            for closed_card in self.closed_cards:
+                new_state = base_new_state.copy()
+                new_state.closed_pile_counts[from_col] -= 1
+                new_state.closed_cards = new_state.closed_cards.discard(closed_card)
+                new_state.opened_pile_cardss[from_col].insert(0, closed_card)
+                new_state._set_card_from_position(
+                    closed_card,
+                    FromPile(from_col, new_state.closed_pile_counts[from_col]),
+                )
+                new_states.append(new_state)
+            return new_states
+        else:
+            return [base_new_state]
+
+    def _move_waste_to_pile(self, to_col: int) -> List["SolitireLightWeightState"]:
+        new_state = self.copy()
+        card = new_state.waste_cards.pop(-1)
+        new_state._set_card_from_position(card, None)
+        if len(new_state.waste_cards) > 0:
+            new_state._set_card_from_position(new_state.waste_cards[-1], "FromWaste")
+        new_state.opened_pile_cardss[to_col].append(card)
+        new_state._set_card_from_position(
+            card,
+            FromPile(
+                to_col,
+                new_state.closed_pile_counts[to_col]
+                + len(new_state.opened_pile_cardss[to_col])
+                - 1,
+            ),
+        )
+        return [new_state]
+
+    def _move_pile_to_foundation(
+        self, from_pile: Tuple[int, int], to_suit: Suit
+    ) -> List["SolitireLightWeightState"]:
+        from_col, from_row = from_pile
+
+        base_new_state = self.copy()
+        card = base_new_state.opened_pile_cardss[from_col].pop(-1)
+        base_new_state._set_card_from_position(card, FromFoundation(to_suit))
+        if base_new_state.foundation_counts[to_suit.value] != 0:
+            base_new_state._set_card_from_position(
+                Card(to_suit, base_new_state.foundation_counts[to_suit.value]), None
+            )
+        base_new_state.foundation_counts[to_suit.value] += 1
+
+        if (
+            len(base_new_state.opened_pile_cardss[from_col]) == 0
+            and base_new_state.closed_pile_counts[from_col] > 0
+        ):
+            new_states = []
+            for closed_card in self.closed_cards:
+                new_state = base_new_state.copy()
+                new_state.closed_pile_counts[from_col] -= 1
+                new_state.closed_cards = new_state.closed_cards.discard(closed_card)
+                new_state.opened_pile_cardss[from_col].insert(0, closed_card)
+                new_state._set_card_from_position(
+                    closed_card,
+                    FromPile(from_col, new_state.closed_pile_counts[from_col]),
+                )
+                new_states.append(new_state)
+            return new_states
+        else:
+            return [base_new_state]
+
+    def _move_foundation_to_pile(
+        self, from_suit: Suit, to_col: int
+    ) -> List["SolitireLightWeightState"]:
+        new_state = self.copy()
+        card = Card(from_suit, new_state.foundation_counts[from_suit.value])
+        new_state.foundation_counts[from_suit.value] -= 1
+        if new_state.foundation_counts[from_suit.value] != 0:
+            new_state._set_card_from_position(
+                Card(from_suit, new_state.foundation_counts[from_suit.value]),
+                FromFoundation(from_suit),
+            )
+        new_state.opened_pile_cardss[to_col].append(card)
+        new_state._set_card_from_position(
+            card,
+            FromPile(
+                to_col,
+                new_state.closed_pile_counts[to_col]
+                + len(new_state.opened_pile_cardss[to_col])
+                - 1,
+            ),
+        )
+        return [new_state]
+
+    def _move_waste_to_foundation(
+        self, to_suit: Suit
+    ) -> List["SolitireLightWeightState"]:
+        new_state = self.copy()
+        card = new_state.waste_cards.pop(-1)
+        new_state._set_card_from_position(card, FromFoundation(to_suit))
+        if new_state.foundation_counts[to_suit.value] != 0:
+            new_state._set_card_from_position(
+                Card(to_suit, new_state.foundation_counts[to_suit.value]), None
+            )
+        if len(new_state.waste_cards) > 0:
+            new_state._set_card_from_position(new_state.waste_cards[-1], "FromWaste")
+        new_state.foundation_counts[to_suit.value] += 1
+        return [new_state]
+
+    def move_uncertain_states(
+        self,
+        from_position: SolitireCardPositionFrom,
+        to_position: SolitireCardPositionTo,
+    ) -> List["SolitireLightWeightState"]:
+        match from_position, to_position:
+            case "FromStock", "ToStock":
+                return self._move_stock_to_stock()
+            case "FromWaste", ToPile(to_col):
+                return self._move_waste_to_pile(to_col)
+            case "FromWaste", ToFoundation(to_suit):
+                return self._move_waste_to_foundation(to_suit)
+            case FromPile(from_col, from_row), ToPile(to_col):
+                return self._move_pile_to_pile((from_col, from_row), to_col)
+            case FromPile(from_col, from_row), ToFoundation(to_suit):
+                return self._move_pile_to_foundation((from_col, from_row), to_suit)
+            case FromFoundation(from_suit), ToPile(to_col):
+                return self._move_foundation_to_pile(from_suit, to_col)
+            case _, _:
+                raise ValueError(f"Invalid move from {from_position} to {to_position}")
+
+    def is_same_state(
+        self, other: "SolitireLightWeightState", is_compatibility: bool = True
+    ) -> bool:
+        if self._token_indices is None:
+            self.to_token_indices()
+        if other._token_indices is None:
+            other.to_token_indices()
+        is_same_token_indices = (
+            self._token_indices == other._token_indices
+            if self._hash_cache == other._hash_cache
+            else False
+        )
+        # Stock comparison open to closed fallback for compatibility
+        if (
+            is_compatibility
+            and self.closed_stock_counts == len(other.opened_stock_cards)
+            and other.closed_stock_counts == len(self.opened_stock_cards)
+        ):
+            is_same = self.is_same_state_compare(other)
+        else:
+            is_same = is_same_token_indices
+        return is_same
+
+    def is_same_state_compare(self, other: "SolitireLightWeightState") -> bool:
+        if self.waste_cards != other.waste_cards:
+            return False
+        if self.foundation_counts != other.foundation_counts:
+            return False
+        if self.closed_pile_counts != other.closed_pile_counts:
+            return False
+        if self.opened_pile_cardss != other.opened_pile_cardss:
+            return False
+        if (
+            self.closed_stock_counts != other.closed_stock_counts
+            or self.opened_stock_cards != other.opened_stock_cards
+        ):
+            if not (
+                self.closed_stock_counts == len(other.opened_stock_cards)
+                and other.closed_stock_counts == len(self.opened_stock_cards)
+            ):
+                return False
+        return True
+
+    def is_all_open(self) -> bool:
+        return len(self.closed_cards) == 0
+
+    def open_count(self) -> int:
+        foundation_count = sum(self.foundation_counts)
+        opened_pile_count = sum(len(cards) for cards in self.opened_pile_cardss)
+        return foundation_count + opened_pile_count
+
+    def verify(self) -> bool:
+        card_from_positions = [None] * 52
+
+        def _set_card_from_position(
+            card: Card, from_position: SolitireCardPositionFrom
+        ):
+            card_from_positions[card.suit.value * 13 + card.number - 1] = from_position
+
+        def _get_card_from_position(card: Card) -> SolitireCardPositionFrom:
+            return card_from_positions[card.suit.value * 13 + card.number - 1]
+
+        if len(self.waste_cards) > 0:
+            _set_card_from_position(self.waste_cards[-1], "FromWaste")
+        for suit_index, foundation_count in enumerate(self.foundation_counts):
+            if foundation_count > 0:
+                suit = Suit(suit_index)
+                _set_card_from_position(
+                    Card(suit, foundation_count), FromFoundation(suit)
+                )
+        for col, (closed_pile_count, open_pile_cards) in enumerate(
+            zip(self.closed_pile_counts, self.opened_pile_cardss)
+        ):
+            for row, card in enumerate(open_pile_cards):
+                _set_card_from_position(card, FromPile(col, row + closed_pile_count))
+        for suit in Suit:
+            for number in range(1, 14):
+                card = Card(suit, number)
+                verify_pos = _get_card_from_position(card)
+                cls_pos = self._get_card_from_position(card)
+                if verify_pos != cls_pos:
+                    print(f"Card {card} position mismatch: {verify_pos} != {cls_pos}")
+        for suit in Suit:
+            for number in range(1, 14):
+                card = Card(suit, number)
+                verify_pos = _get_card_from_position(card)
+                cls_pos = self._get_card_from_position(card)
+                if verify_pos != cls_pos:
+                    return False
+        if len(self.closed_cards) != self.closed_stock_counts + sum(
+            self.closed_pile_counts
+        ):
+            print(
+                f"Closed cards count mismatch: {len(self.closed_cards)} !=",
+                f"{self.closed_stock_counts + sum(self.closed_pile_counts)}",
+            )
+            return False
+        cards = []
+        cards.extend(self.closed_cards)
+        cards.extend(self.opened_stock_cards)
+        cards.extend(self.waste_cards)
+        for suit_index, foundation_count in enumerate(self.foundation_counts):
+            suit = Suit(suit_index)
+            for number in range(1, foundation_count + 1):
+                cards.append(Card(suit, number))
+        for opened_pile_cards in self.opened_pile_cardss:
+            cards.extend(opened_pile_cards)
+        cards.sort(key=lambda c: (c.suit.value, c.number))
+        ref_cards = [Card(suit, number) for suit in Suit for number in range(1, 14)]
+        ref_cards.sort(key=lambda c: (c.suit.value, c.number))
+        if cards != ref_cards:
+            print(f"Cards mismatch: {cards} != {ref_cards}")
+            return False
+
+        return True
+
+    def to_tokens(self) -> List[Token]:
+        tokens = []
+        tokens.append(TokenCLS())
+        for suit_index, foundation_count in enumerate(self.foundation_counts):
+            tokens.append(TokenFoundation(Suit(suit_index)))
+            for number in range(1, foundation_count + 1):
+                tokens.append(TokenOpen(Card(Suit(suit_index), number)))
+        if self.stock_cycle_count > 0:
+            tokens.append(TokenOpenedStock())
+            for card in self.opened_stock_cards:
+                tokens.append(TokenOpen(card))
+        else:
+            tokens.append(TokenClosedStock())
+            for _ in range(self.closed_stock_counts):
+                tokens.append(TokenClose())
+        tokens.append(TokenWaste())
+        for card in self.waste_cards:
+            tokens.append(TokenOpen(card))
+        for closed_pile_count, opened_pile_cards in zip(
+            self.closed_pile_counts, self.opened_pile_cardss
+        ):
+            tokens.append(TokenClosedPile())
+            for _ in range(closed_pile_count):
+                tokens.append(TokenClose())
+            tokens.append(TokenOpenedPile())
+            for card in opened_pile_cards:
+                tokens.append(TokenOpen(card))
+        tokens.append(TokenEOS())
+        return tokens
+
+    def to_token_indices(self) -> List[int]:
+        tokens = []
+        tokens.append(52 + 4 + 1)  # TokenCLS
+        for suit_index, foundation_count in enumerate(self.foundation_counts):
+            tokens.append(52 + 1 + suit_index)  # TokenFoundation
+            for number in range(1, foundation_count + 1):
+                tokens.append(suit_index * 13 + number - 1)
+        if self.stock_cycle_count > 0:
+            tokens.append(52 + 4 + 3)  # TokenOpenedStock
+            for card in self.opened_stock_cards:
+                tokens.append(card.suit.value * 13 + card.number - 1)
+        else:
+            tokens.append(52 + 4 + 4)  # TokenClosedStock
+            for _ in range(self.closed_stock_counts):
+                tokens.append(52)
+        tokens.append(52 + 4 + 5)  # TokenWaste
+        for card in self.waste_cards:
+            tokens.append(card.suit.value * 13 + card.number - 1)
+        for closed_pile_count, opened_pile_cards in zip(
+            self.closed_pile_counts, self.opened_pile_cardss
+        ):
+            tokens.append(52 + 4 + 7)  # TokenClosedPile
+            for _ in range(closed_pile_count):
+                tokens.append(52)
+            tokens.append(52 + 4 + 6)  # TokenOpenedPile
+            for card in opened_pile_cards:
+                tokens.append(card.suit.value * 13 + card.number - 1)
+        tokens.append(52 + 4 + 2)  # TokenEOS
+        self._token_indices = tokens
+        self._hash_cache = hash(tuple(self._token_indices))
+        return tokens
+
+    def hash(self):
+        if self._token_indices is None:
+            self.to_token_indices()
+        return self._hash_cache
+
+    def copy(self) -> "SolitireLightWeightState":
+        new_state = copy.copy(self)
+        new_state.waste_cards = self.waste_cards.copy()
+        new_state.foundation_counts = self.foundation_counts.copy()
+        new_state.closed_pile_counts = self.closed_pile_counts.copy()
+        new_state.opened_pile_cardss = [
+            cards.copy() for cards in self.opened_pile_cardss
+        ]
+        new_state.opened_stock_cards = self.opened_stock_cards.copy()
+        new_state._card_from_positions = self._card_from_positions.copy()
+        new_state._token_indices = None
+        new_state._hash_cache = None
+        return new_state
+
+
+class SolitireLightWeightGame:
+    def __init__(self, initial_states: List[SolitireLightWeightState]):
+        self.states = plist(initial_states)
+        self.valid_moves_cache = None
+        self.moved_states_cache = {}
+        self.is_all_open_cache = None
+        self.open_count_cache = None
+
+    def is_same_as_any_state(
+        self, state: SolitireLightWeightState, is_compatibility: bool = True
+    ) -> bool:
+        return any(
+            s.is_same_state(state, is_compatibility=is_compatibility)
+            for s in self.states
+        )
+
+    def enumerate_valid_moves_excluding_same_state(
+        self, is_compatibility: bool = True
+    ) -> List[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
+        if self.valid_moves_cache is not None:
+            return self.valid_moves_cache
+        valid_moves = self.states.first.enumerate_valid_moves()
+        valid_moves_excluding_same_state = []
+        # state_set = pset(s.hash() for s in self.states)
+        for from_position, to_position in valid_moves:
+            new_states = self.states.first.move_uncertain_states(
+                from_position, to_position
+            )
+            assert len(new_states) > 0
+            self.moved_states_cache[(from_position, to_position)] = new_states
+            # open move is always new state
+            if len(new_states) > 1:
+                valid_moves_excluding_same_state.append((from_position, to_position))
+            # elif not new_states[0].hash() in state_set:
+            elif not any(
+                new_states[0].is_same_state(s, is_compatibility=is_compatibility)
+                for s in self.states
+            ):
+                valid_moves_excluding_same_state.append((from_position, to_position))
+        self.valid_moves_cache = valid_moves_excluding_same_state
+        return valid_moves_excluding_same_state
+
+    # unchecked
+    def move_uncertain_states(
+        self,
+        from_position: SolitireCardPositionFrom,
+        to_position: SolitireCardPositionTo,
+    ) -> List["SolitireLightWeightGame"]:
+        if (from_position, to_position) in self.moved_states_cache:
+            new_states = self.moved_states_cache[(from_position, to_position)]
+        else:
+            new_states = self.states.first.move_uncertain_states(
+                from_position, to_position
+            )
+            self.moved_states_cache[(from_position, to_position)] = new_states
+        new_games = []
+        for new_state in new_states:
+            if new_state is not None and not self.is_same_as_any_state(new_state):
+                new_game = self.copy()
+                new_game.states = self.states.cons(new_state)
+                new_games.append(new_game)
+        return new_games
+
+    def is_all_open(self) -> bool:
+        if self.is_all_open_cache is None:
+            self.is_all_open_cache = self.states.first.is_all_open()
+        return self.is_all_open_cache
+
+    def open_count(self) -> int:
+        if self.open_count_cache is None:
+            self.open_count_cache = self.states.first.open_count()
+        return self.open_count_cache
+
+    def verify(self) -> bool:
+        return all(state.verify() for state in self.states)
+
+    @classmethod
+    def from_solitire_game(cls, game: SolitireGame) -> "SolitireLightWeightGame":
+        return cls([SolitireLightWeightState(state) for state in reversed(game.states)])
+
+    def copy(self) -> "SolitireLightWeightGame":
+        new_game = copy.copy(self)
+        new_game.moved_states_cache = {}
+        new_game.is_all_open_cache = None
+        new_game.open_count_cache = None
+        new_game.valid_moves_cache = None
+        return new_game

@@ -18,6 +18,8 @@ from solitier_game import (
     ToPile,
     all_cards,
 )
+from solitier_game_lw import SolitireLightWeightGame, SolitireLightWeightState
+from solitier_token import state_to_token_indices
 
 suit_filenames = ["clubs", "diamonds", "hearts", "spades"]  # カードのスート名
 number_filenames = [
@@ -578,7 +580,7 @@ class SolitireGameVisualizer:
                 for event in events:
                     if event.type == pygame.QUIT:
                         running = False
-                        pygame.quit()
+                        is_loop = False
 
                 if self.game.state.is_all_open():
                     print("All cards are open!")
@@ -600,7 +602,7 @@ class SolitireGameVisualizer:
                     running = False
                     break
                 else:
-                    self.game.checked_move_excluding_same_state(*move)
+                    self.game.checked_move(*move)
                     self.unselect_all()
                     self.select_from_position(move[0])
                     self.select_to_position(move[1])
@@ -722,9 +724,19 @@ class SolitireGameVisualizer:
                                 if is_allow_same_state:
                                     self.game.checked_move(from_position, to_position)
                                 else:
+                                    search_state = SolitireLightWeightState(
+                                        self.game.state
+                                    )
                                     self.game.checked_move_excluding_same_state(
                                         from_position, to_position
                                     )
+                                    if self.game.state.is_valid_move(
+                                        from_position, to_position
+                                    ):
+                                        new_states = search_state.move_uncertain_states(
+                                            from_position, to_position
+                                        )
+                                        assert new_states[0].verify()
 
                     if self.game.state.is_all_open():
                         print("All cards are open!")
@@ -743,26 +755,118 @@ class SolitireGameVisualizer:
                     print(f"Valid From Positions: {valid_from_positions}")
                     for valid_from_position in valid_from_positions:
                         self.select_from_position(valid_from_position)
-                    # st_time = time.time_ns()
-                    # valid_moves = self.game.enumerate_valid_moves_excluding_same_state()
-                    # uncertain_states = {
-                    #    from_to_position: self.game.state.move_uncertain_states(
-                    #        *from_to_position
-                    #    )
-                    #    for from_to_position in valid_moves
-                    # }
-                    # ed_time = time.time_ns()
-                    # print(
-                    #    f"Uncertain States Time: {(ed_time - st_time) * 1e-9:.2f} seconds"
-                    # )
-                    # st_time = time.time_ns()
-                    # uncertain_states_count = {
-                    #    from_to_position: len(states)
-                    #    for from_to_position, states in uncertain_states.items()
-                    # }
-                    # sum_uncertain_states_count = sum(uncertain_states_count.values())
-                    # print(f"Uncertain States: {uncertain_states_count}")
-                    # print(f"Sum of Uncertain States: {sum_uncertain_states_count}")
+                    # for debug
+                    self.visualize()
+                    screen.fill(background_color)
+                    self.draw_sprite(screen)
+                    pygame.display.flip()  # Update the display
+                    st_time = time.time_ns()
+                    valid_moves = self.game.enumerate_valid_moves_excluding_same_state()
+                    uncertain_states = {
+                        from_to_position: self.game.state.move_uncertain_states(
+                            *from_to_position
+                        )
+                        for from_to_position in valid_moves
+                    }
+                    ed_time = time.time_ns()
+                    print(
+                        f"Uncertain States Time(Game): {(ed_time - st_time) * 1e-9:.2f} seconds"
+                    )
+                    uncertain_states_count = {
+                        from_to_position: len(states)
+                        for from_to_position, states in uncertain_states.items()
+                    }
+                    sum_uncertain_states_count = sum(uncertain_states_count.values())
+                    print(f"Uncertain States: {uncertain_states_count}")
+                    print(
+                        f"Sum of Uncertain States(Game): {sum_uncertain_states_count}"
+                    )
+
+                    # verify SolitireLightWeightGame
+                    search_game = SolitireLightWeightGame.from_solitire_game(self.game)
+                    st_time = time.time_ns()
+                    valid_moves_verify = (
+                        search_game.enumerate_valid_moves_excluding_same_state(
+                            is_compatibility=True
+                        )
+                    )
+                    uncertain_states_verify = {}
+                    for valid_move in valid_moves_verify:
+                        uncertain_states_verify[valid_move] = (
+                            search_game.move_uncertain_states(*valid_move)
+                        )
+                    ed_time = time.time_ns()
+                    print(
+                        f"Uncertain States Time(LWGame): {(ed_time - st_time) * 1e-9:.6f} seconds"
+                    )
+                    uncertain_states_count_verify = {
+                        from_to_position: len(states)
+                        for from_to_position, states in uncertain_states_verify.items()
+                    }
+                    sum_uncertain_states_count_verify = sum(
+                        uncertain_states_count_verify.values()
+                    )
+                    print(f"Uncertain States: {uncertain_states_count_verify}")
+                    print(
+                        f"Sum of Uncertain States(LWGame): {sum_uncertain_states_count_verify}"
+                    )
+
+                    print(f"Valid Moves: {set(valid_moves)}")
+                    print(f"Valid Moves: {set(valid_moves_verify)}")
+                    assert set(valid_moves) == set(valid_moves_verify)
+                    assert (
+                        sum_uncertain_states_count == sum_uncertain_states_count_verify
+                    )
+                    for move, states_verify in uncertain_states_verify.items():
+                        states = uncertain_states.get(move)
+                        assert states is not None
+                        assert len(states) == len(states_verify), (
+                            f"Move: {move}, "
+                            f"{len(states)} != {len(states_verify)}, "
+                            f"{states} != {states_verify}"
+                        )
+                        assert (
+                            states[0].open_count() == states_verify[0].open_count()
+                        ), f"{move}: {states[0].open_count()} != {states_verify[0].open_count()}"
+                        for state in states_verify:
+                            assert state.states.first.verify(), f"{move}"
+                        token_indicess = [
+                            state_to_token_indices(state) for state in states
+                        ]
+                        token_hash_set = set([hash(tuple(t)) for t in token_indicess])
+                        token_indicess_verify = [
+                            state.states.first.to_token_indices()
+                            for state in states_verify
+                        ]
+                        token_hash_set_verify = set(
+                            [hash(tuple(t)) for t in token_indicess_verify]
+                        )
+                        assert token_hash_set == token_hash_set_verify, f"{move}"
+
+                    # verify SolitireLightWeightState
+                    search_state = SolitireLightWeightState(self.game.state)
+                    st_time = time.time_ns()
+                    valid_moves_verify = search_state.enumerate_valid_moves()
+                    uncertain_states_verify = {}
+                    for valid_move in valid_moves_verify:
+                        uncertain_states_verify[valid_move] = (
+                            search_state.move_uncertain_states(*valid_move)
+                        )
+                    ed_time = time.time_ns()
+                    print(
+                        f"Uncertain States Time(LWState): {(ed_time - st_time) * 1e-9:.6f} seconds"
+                    )
+                    valid_moves = self.game.state.enumerate_valid_moves()
+                    print(f"Valid Moves: {set(valid_moves)}")
+                    print(f"Valid Moves: {set(valid_moves_verify)}")
+                    assert set(valid_moves) == set(valid_moves_verify)
+                    tokens_ref = state_to_token_indices(self.game.state)
+                    tokens_verify = search_state.to_token_indices()
+                    assert (
+                        tokens_ref == tokens_verify
+                    ), f"{tokens_ref} != {tokens_verify}"
+                    clock.tick(60)  # Limit to 60 FPS
+                    continue
 
             self.visualize()
             screen.fill(background_color)

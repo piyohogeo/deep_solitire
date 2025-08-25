@@ -92,13 +92,10 @@ def build_training_data(
     path: str, score_args: dict
 ) -> tuple[list[tuple[np.ndarray, float]], bool]:
     try:
-        gc.disable()  # Disable garbage collection for performance
         game = SolitireGame.load_from_file(path)
     except (EOFError, pickle.UnpicklingError, OSError) as e:
         print(f"Error loading game from {path}: {e}")
         return ([], False)
-    finally:
-        gc.enable()
     score = score_game(game, score_args=score_args)
     discounted = [
         score * (score_args["gamma"] ** i) for i in reversed(range(len(game.states)))
@@ -114,14 +111,10 @@ def build_training_data_deltas(
     path: str, score_args: dict
 ) -> tuple[list[tuple[np.ndarray, float]], bool]:
     try:
-        gc.disable()
         game = SolitireGame.load_from_file(path)
     except (EOFError, pickle.UnpicklingError, OSError) as e:
         print(f"Error loading game from {path}: {e}")
         return ([], False)
-    finally:
-        gc.enable()
-
     # 変更点: 各遷移の報酬列 r_t を作る
     rewards = score_game_deltas(game, score_args=score_args)
 

@@ -6,9 +6,11 @@ from huggingface_hub import hf_hub_download
 from solitier_game import SolitireCardPositionFrom, SolitireCardPositionTo, SolitireGame
 from solitier_infer import SolitireValueExecuter, estimate_move_of_game
 from solitier_model import SolitireEndToEndValueModel
+from solitier_search import estimate_move_for_game_by_mcts
 from solitier_visualize import SolitireGameVisualizer
 
 repo_id = "piyohogeo/deep_solitire"
+# 28.5% @ one-step e-greedy(0.1)
 pth = hf_hub_download(
     repo_id,
     filename="value/solitire_endtoend_value_m512_l18_h8_n74_cb0.00_scr0.1445_dss_20250820_012942/best_model.pth",
@@ -21,7 +23,7 @@ print(f"Model path: {pth}")
 print(f"Model params path: {jpath}")
 
 
-async def main():
+async def demo_one_step_greedy():
     model = SolitireEndToEndValueModel.load_from_file(os.path.split(pth)[0])
     game = SolitireGame()
     visualizer = SolitireGameVisualizer(game)
@@ -38,6 +40,36 @@ async def main():
         estimate_move,
         is_loop=True,
     )
+
+
+# experimentally implemented
+async def demo_mcts():
+    model = SolitireEndToEndValueModel.load_from_file(os.path.split(pth)[0])
+    game = SolitireGame()
+    visualizer = SolitireGameVisualizer(game)
+    executer = SolitireValueExecuter(model)
+
+    async def estimate_move(
+        game: SolitireGame,
+    ) -> Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
+        return await estimate_move_for_game_by_mcts(
+            game,
+            executer,
+            iterations=2000,
+            batch_size=64,
+            c_ucb=1.4,
+            is_verbose=False,
+            is_tqdm=False,
+        )
+
+    await visualizer.run_by_move_estimator(
+        estimate_move,
+        is_loop=True,
+    )
+
+
+async def main():
+    await demo_one_step_greedy()
 
 
 if __name__ == "__main__":

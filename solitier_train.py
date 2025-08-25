@@ -1,9 +1,11 @@
 import datetime
+import math
 import os
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from lion_pytorch import Lion
 from pt_utils import build_mask_like
 from solitier_model import (
@@ -44,6 +46,83 @@ def mean_off_diag(embeddings: nn.Embedding, token_index_len: int) -> float:
         mean_offdiag = (sim.sum() - sim.diag().sum()) / (sim.numel() - len(E))
         # mean_offdiag が 0.3 以上に跳ねたら怪しい、などのしきい値を経験的に設定)
         return mean_offdiag.item()
+
+
+def _to_norm_tensors_from_tuple(
+    y_pred: torch.Tensor, y_true: torch.Tensor, mu_sigma: tuple | None
+):
+    """
+    target_norm が (mu, sigma) タプルのときだけ標準化テンソルを返す。
+    それ以外(None)なら (None, None) を返す。
+    """
+    if mu_sigma is None:
+        return None, None
+    mu, sigma = mu_sigma
+    mu = torch.as_tensor(mu, device=y_pred.device, dtype=y_pred.dtype)
+    sigma = torch.as_tensor(sigma, device=y_pred.device, dtype=y_pred.dtype).clamp_min(
+        1e-6
+    )
+    ypn = (y_pred - mu) / sigma
+    ytn = (y_true - mu) / sigma
+    return ypn, ytn
+
+
+def log_batch_metrics_to_wandb_tuple(
+    *,
+    y_pred: torch.Tensor,
+    y_true: torch.Tensor,
+    mu_sigma: tuple | None,  # ← (mu, sigma) or None
+    huber_delta: float,
+    global_step: int,
+    prefix: str,  # "train" or "val"
+):
+    """
+    バッチ単位で標準化後のHuber/MSEと生MSEをwandbに記録。
+    返り値は epoch 集計用 (count, sse_norm, sst_norm, sum_mse_raw, sum_mse_norm, sum_huber_norm)
+    """
+    y_pred = y_pred.float().view(-1)
+    y_true = y_true.float().view(-1)
+    bsz = y_true.numel()
+
+    # 生MSE
+    mse_raw = F.mse_loss(y_pred, y_true, reduction="mean")
+
+    # 標準化後
+    ypn, ytn = _to_norm_tensors_from_tuple(y_pred, y_true, mu_sigma)
+    if ypn is not None:
+        mse_norm = F.mse_loss(ypn, ytn, reduction="mean")
+        try:
+            huber_norm = F.huber_loss(ypn, ytn, delta=huber_delta, reduction="mean")
+        except TypeError:
+            huber_norm = F.smooth_l1_loss(ypn, ytn, beta=huber_delta, reduction="mean")
+
+        # R^2 用 SSE/SST（標準化後）
+        sse = torch.sum((ypn - ytn) ** 2)
+        ybar = torch.mean(ytn)
+        sst = torch.sum((ytn - ybar) ** 2)
+
+        wandb.log(
+            {
+                f"step_Loss/{prefix}_mse_raw": mse_raw.item(),
+                f"step_Loss/{prefix}_mse_norm": mse_norm.item(),
+                f"step_Loss/{prefix}_huber_norm": huber_norm.item(),
+                "global_step": global_step,
+            }
+        )
+        return (
+            bsz,
+            float(sse.item()),
+            float(sst.item()),
+            float(mse_raw.item() * bsz),
+            float(mse_norm.item() * bsz),
+            float(huber_norm.item() * bsz),
+        )
+
+    # 標準化情報が無い場合
+    wandb.log(
+        {f"step_Loss/{prefix}_mse_raw": mse_raw.item(), "global_step": global_step}
+    )
+    return (bsz, 0.0, 0.0, float(mse_raw.item() * bsz), 0.0, 0.0)
 
 
 class SolitireMAETrainer:
@@ -633,6 +712,50 @@ class SolitireValueTrainer:
         )
 
 
+# 追加: ローリング集計用の小ヘルパ
+class _RollingAgg:
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.N = 0
+        self.sse_norm = 0.0
+        self.sst_norm = 0.0
+        self.sum_mse_raw = 0.0
+        self.sum_mse_norm = 0.0
+        self.sum_huber_norm = 0.0
+
+    def update(self, bsz, sse, sst, mse_raw_sum, mse_norm_sum, huber_norm_sum):
+        self.N += bsz
+        self.sse_norm += sse
+        self.sst_norm += sst
+        self.sum_mse_raw += mse_raw_sum
+        self.sum_mse_norm += mse_norm_sum
+        self.sum_huber_norm += huber_norm_sum
+
+    def log_and_reset(self, prefix: str, epoch: int | None = None):
+        if self.N == 0:
+            return
+        logs = {
+            f"Loss/{prefix}_mse_raw": self.sum_mse_raw / self.N,
+        }
+        if self.sum_mse_norm > 0:
+            logs.update(
+                {
+                    f"Loss/{prefix}_mse_norm": self.sum_mse_norm / self.N,
+                    f"Loss/{prefix}_huber_norm": self.sum_huber_norm / self.N,
+                }
+            )
+        if self.sst_norm > 0:
+            logs[f"R2/{prefix}_norm"] = 1.0 - (
+                self.sse_norm / max(1e-12, self.sst_norm)
+            )
+        if epoch is not None:
+            logs["epoch"] = epoch
+        wandb.log(logs)
+        self.reset()
+
+
 class SolitireEndToEndValueTrainer:
     def __init__(
         self,
@@ -720,6 +843,15 @@ class SolitireEndToEndValueTrainer:
         self.model.train()
         self.model.to(self.device)
         train_loss = 0.0
+
+        mu_sigma = getattr(self, "target_norm", None)  # (mu, sigma) or None
+        huber_delta = getattr(self, "huber_delta", 1.0)
+        log_every = (
+            self.eval_every_step if self.eval_every_step > 0 else len(train_dataloader)
+        )
+
+        rolling = _RollingAgg()
+
         with tqdm(train_dataloader, desc=f"Epoch {self.epoch}") as pbar:
             for batch in pbar:
                 current_lr = self.optimizer.param_groups[0]["lr"]
@@ -733,6 +865,10 @@ class SolitireEndToEndValueTrainer:
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     outputs = self.compiled_model(indexes)
 
+                # ★ ログ用に“生の”出力と教師を退避
+                log_pred = outputs.detach()
+                log_true = scores.detach()
+
                 if self.target_norm is not None:
                     mu, sigma = self.target_norm
                     scores = (scores - mu) / sigma
@@ -745,6 +881,19 @@ class SolitireEndToEndValueTrainer:
                 )
                 self.optimizer.step()
                 self.scheduler.step()
+
+                # ★ ロガーには生値＋mu,sigma を渡す（＝ロガー内で一度だけ標準化）
+                bsz, sse, sst, mse_raw_sum, mse_norm_sum, huber_norm_sum = (
+                    log_batch_metrics_to_wandb_tuple(
+                        y_pred=log_pred,  # ← 正規化前
+                        y_true=log_true,  # ← 正規化前
+                        mu_sigma=self.target_norm,  # (mu, sigma) or None
+                        huber_delta=huber_delta,
+                        global_step=self.global_step,
+                        prefix="train",
+                    )
+                )
+                rolling.update(bsz, sse, sst, mse_raw_sum, mse_norm_sum, huber_norm_sum)
 
                 mean_off_diag_value = mean_off_diag(
                     self.model.embeddings, self.model_params["embeddings_len"]
@@ -762,6 +911,8 @@ class SolitireEndToEndValueTrainer:
                 train_loss += loss.item()
                 self.global_step += 1
 
+                if self.global_step % log_every == 0:
+                    rolling.log_and_reset(prefix="train")  # epochは未到達なので付けない
                 # ★Nステップ毎に in-epoch 検証（val_dataloader が与えられた場合のみ）
                 if (val_dataloader is not None) and (self.eval_every_step > 0):
                     if self.global_step % self.eval_every_step == 0:
@@ -774,11 +925,14 @@ class SolitireEndToEndValueTrainer:
         wandb.log({"Loss/train": avg_train_loss, "epoch": self.epoch})
         return locals()
 
-    def _validate(self, val_dataloader, is_tqdm=True):
+    def _validate(self, val_dataloader, is_tqdm: bool = True) -> float:
         self.model.eval()
         self.model.to(self.device)
 
         val_loss = 0.0
+        mu_sigma = getattr(self, "target_norm", None)  # (mu, sigma) or None
+        huber_delta = getattr(self, "huber_delta", 1.0)
+        rolling = _RollingAgg()
         with torch.no_grad():
             if is_tqdm:
                 pbar = tqdm(val_dataloader, desc=f"Validation Epoch {self.epoch}")
@@ -790,12 +944,30 @@ class SolitireEndToEndValueTrainer:
                 indexes = indexes.to(self.device)
                 with torch.autocast("cuda", dtype=torch.bfloat16):
                     outputs = self.compiled_model(indexes)
+                # ★ ログ用に“生の”出力と教師を退避
+                log_pred = outputs.detach()
+                log_true = scores.detach()
                 if self.target_norm is not None:
                     mu, sigma = self.target_norm
                     scores = (scores - mu) / sigma
                     outputs = (outputs - mu) / sigma
                 loss = self.criterion(outputs.float(), scores)
                 val_loss += loss.item()
+
+                # _validate 内（抜粋）
+                bsz, sse, sst, mse_raw_sum, mse_norm_sum, huber_norm_sum = (
+                    log_batch_metrics_to_wandb_tuple(
+                        y_pred=log_pred,
+                        y_true=log_true,
+                        mu_sigma=mu_sigma,
+                        huber_delta=huber_delta,
+                        global_step=self.global_step,
+                        prefix="val",  # ← ここを val に
+                    )
+                )
+                rolling.update(bsz, sse, sst, mse_raw_sum, mse_norm_sum, huber_norm_sum)
+
+        rolling.log_and_reset(prefix="val")  # epochは未到達なので付けない
 
         avg_val_loss = val_loss / len(val_dataloader)
         wandb.log({"step_Loss/val": avg_val_loss, "global_step": self.global_step})
