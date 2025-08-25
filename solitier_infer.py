@@ -234,7 +234,6 @@ async def play_game_with_move_estimator(
         Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]],
     ],
     max_moves: int = 200,
-    epsilon: float = 0.0,
     is_verbose: bool = False,
 ) -> bool:
     """
@@ -262,7 +261,7 @@ async def play_game_with_move_estimator(
     return False  # Game did not complete within max_moves
 
 
-async def play_game_with_executor(
+async def play_game_with_executor_greedy(
     game: SolitireGame,
     executor: SolitireValueExecuter,
     max_moves: int = 200,
@@ -293,7 +292,6 @@ async def play_game_with_executor(
         game,
         estimate_move,
         max_moves=max_moves,
-        epsilon=epsilon,
         is_verbose=is_verbose,
     )
 
@@ -311,7 +309,6 @@ async def loop_log_play_game_by_move_estimator(
     model_name: str,
     log_dir: str = r"/mnt/c/log/solitire/generated_log",
     max_moves: int = 200,
-    epsilon: float = 0.0,
     is_verbose: bool = False,
     post_fix: str = "",
 ) -> None:
@@ -324,7 +321,6 @@ async def loop_log_play_game_by_move_estimator(
             game,
             move_estimate,
             max_moves=max_moves,
-            epsilon=epsilon,
             is_verbose=is_verbose,
         )
         filename = os.path.join(path, create_datetime_str() + ".pickle")
@@ -333,7 +329,7 @@ async def loop_log_play_game_by_move_estimator(
         print(is_successed, open_count)
 
 
-async def loop_log_play_game_with_executor(
+async def loop_log_play_game_with_executor_greedy(
     executor: AbstractSolitireValueExecutor,
     model_name: str,
     log_dir: str = r"/mnt/c/log/solitire/generated_log",
@@ -367,13 +363,12 @@ async def loop_log_play_game_with_executor(
         model_name=model_name,
         log_dir=log_dir,
         max_moves=max_moves,
-        epsilon=epsilon,
         is_verbose=is_verbose,
         post_fix=post_fix,
     )
 
 
-def batched_loop_log_play_game(
+def batched_loop_log_play_game_greedy(
     model: SolitireAbstractEndToEndValueModel,
     model_name: str,
     log_dir: str = r"/mnt/c/log/solitire/generated_log",
@@ -389,7 +384,7 @@ def batched_loop_log_play_game(
     executor.start()
     for i in range(batch_size):
         asyncio.create_task(
-            loop_log_play_game_with_executor(
+            loop_log_play_game_with_executor_greedy(
                 executor,
                 model_name=model_name,
                 log_dir=log_dir,

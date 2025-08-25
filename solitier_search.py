@@ -14,9 +14,15 @@ from typing import (
 )
 
 import tqdm
+from solitier_dataset import DEFAULT_SCORE_ARGS
 from solitier_game import SolitireCardPositionFrom, SolitireCardPositionTo, SolitireGame
 from solitier_game_lw import SolitireLightWeightGame
-from solitier_infer import SolitireValueExecuter
+from solitier_infer import (
+    AbstractSolitireValueExecutor,
+    SolitireValueExecuter,
+    estimate_move_of_game_greedy,
+    loop_log_play_game_by_move_estimator,
+)
 
 SolitireSearchAction = Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]
 
@@ -42,7 +48,10 @@ class SolitireSearchState:
 
     def next(self, action: SolitireSearchAction) -> List["SolitireSearchState"]:
         next_games = self.game.move_uncertain_states(*action)
-        if len(next_games) > self._max_next_states:
+        if (
+            self._max_next_states is not None
+            and len(next_games) > self._max_next_states
+        ):
             next_games = random.sample(next_games, self._max_next_states)
         return [SolitireSearchState(g) for g in next_games]
 
@@ -257,35 +266,97 @@ async def mcts_with_value_and_chance_batched(
     return best_action
 
 
-async def estimate_move_for_game_by_mcts(
+async def estimate_move_of_game_by_mcts(
     game: SolitireGame,
     executer: SolitireValueExecuter,
     iterations: int = 2000,
     batch_size: int = 64,
     c_ucb: float = 1.4,
+    epsilon: float = 0.0,
     is_verbose: bool = False,
     is_tqdm: bool = False,
+    score_args: Optional[dict] = None,
 ) -> Optional[SolitireSearchAction]:
     """
     ソリティアゲームに対してMCTSで次の手を推定する。
     返り値: 採用する action（訪問回数最大）
     """
+    if score_args is None:
+        score_args = DEFAULT_SCORE_ARGS
+    if random.random() < epsilon:
+        moves = game.enumerate_valid_moves_excluding_same_state()
+        return random.choice(moves) if moves else None
+
     lw_game = SolitireLightWeightGame.from_solitire_game(game)
     root_state = SolitireSearchState(lw_game)
+
+    assert (
+        score_args.get("is_delta", False) == False
+    ), "score_args['is_delta'] must be False"
+    full_scale = 5.2 + score_args.get("complete_bonus", 0.0)
 
     async def v_batch(ss: List[SolitireSearchState]) -> List[float]:
         states = [s.game.states.first for s in ss]
         vals = await executer.execute(states)
-        normalized_vals = [val / 5.2 * 2.0 - 1.0 for val in vals]  # [-1,1]に正規化
+        normalized_vals = [
+            val / full_scale * 2.0 - 1.0 for val in vals
+        ]  # [-1,1]に正規化
         clipped_vals = [max(-1.0, min(1.0, v)) for v in normalized_vals]
         return clipped_vals
 
-    return await mcts_with_value_and_chance_batched(
-        root_state,
-        v_batch,
-        iterations,
-        batch_size,
-        c_ucb,
+    try:
+        mct_move = await mcts_with_value_and_chance_batched(
+            root_state,
+            v_batch,
+            iterations,
+            batch_size,
+            c_ucb,
+            is_verbose=is_verbose,
+            is_tqdm=is_tqdm,
+        )
+    except Exception as e:
+        print(f"MCTS中にエラー発生: {e}")
+        mct_move = None
+    if mct_move is None:
+        return await estimate_move_of_game_greedy(
+            game, executer, epsilon=0.0, is_verbose=is_verbose
+        )
+    else:
+        return mct_move
+
+
+async def loop_log_play_game_with_executor_mcts(
+    executor: AbstractSolitireValueExecutor,
+    model_name: str,
+    log_dir: str = r"/mnt/c/log/solitire/generated_log",
+    max_moves: int = 200,
+    epsilon: float = 0.0,
+    is_verbose: bool = False,
+    score_args: Optional[dict] = None,
+    iterations: int = 2000,
+    batch_size: int = 64,
+    c_ucb: float = 1.4,
+) -> None:
+    async def estimate_move(
+        game: SolitireGame,
+    ) -> Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]:
+        return await estimate_move_of_game_by_mcts(
+            game,
+            executor,
+            epsilon=epsilon,
+            is_verbose=is_verbose,
+            score_args=score_args,
+            iterations=iterations,
+            batch_size=batch_size,
+            c_ucb=c_ucb,
+        )
+
+    post_fix = f"_mcts_it{iterations}_bs{batch_size}_ucb{c_ucb:.2f}"
+    return await loop_log_play_game_by_move_estimator(
+        estimate_move,
+        model_name=model_name,
+        log_dir=log_dir,
+        max_moves=max_moves,
         is_verbose=is_verbose,
-        is_tqdm=is_tqdm,
+        post_fix=post_fix,
     )
