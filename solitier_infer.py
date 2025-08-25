@@ -136,7 +136,7 @@ AbstractSolitireValueExecutor = Union[
 ]
 
 
-async def estimate_move_of_game(
+async def estimate_move_of_game_greedy(
     game: SolitireGame,
     executor: AbstractSolitireValueExecutor,
     epsilon: float = 0.0,
@@ -279,7 +279,7 @@ async def play_game_with_executor(
     async def estimate_move(
         game: SolitireGame,
     ) -> Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]:
-        return estimate_move_of_game(
+        return await estimate_move_of_game_greedy(
             game,
             executor,
             epsilon=epsilon,
@@ -316,10 +316,6 @@ async def loop_log_play_game_by_move_estimator(
     post_fix: str = "",
 ) -> None:
     path = os.path.join(log_dir, model_name)
-    if cvar_alpha is not None:
-        path += f"_cvar{cvar_alpha:.2f}"
-    if is_allow_same_state:
-        path += "_ss"
     path += post_fix
     os.makedirs(path, exist_ok=True)
     while True:
@@ -351,7 +347,7 @@ async def loop_log_play_game_with_executor(
     async def estimate_move(
         game: SolitireGame,
     ) -> Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]:
-        return estimate_move_of_game(
+        return await estimate_move_of_game_greedy(
             game,
             executor,
             epsilon=epsilon,
@@ -361,6 +357,11 @@ async def loop_log_play_game_with_executor(
             is_allow_same_state=is_allow_same_state,
         )
 
+    post_fix = ""
+    if cvar_alpha is not None:
+        post_fix += f"_cvar{cvar_alpha:.2f}"
+    if is_allow_same_state:
+        post_fix += "_ss"
     return await loop_log_play_game_by_move_estimator(
         estimate_move,
         model_name=model_name,
@@ -368,7 +369,7 @@ async def loop_log_play_game_with_executor(
         max_moves=max_moves,
         epsilon=epsilon,
         is_verbose=is_verbose,
-        post_fix="",
+        post_fix=post_fix,
     )
 
 
