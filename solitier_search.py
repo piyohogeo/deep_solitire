@@ -22,8 +22,9 @@ SolitireSearchAction = Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]
 
 
 class SolitireSearchState:
-    def __init__(self, game: SolitireLightWeightGame):
+    def __init__(self, game: SolitireLightWeightGame, max_next_states: int = 16):
         self.game = game
+        self._max_next_states = max_next_states
 
     def is_terminal(self) -> bool:
         return self.game.is_all_open() or len(self.legal_actions()) == 0
@@ -43,6 +44,8 @@ class SolitireSearchState:
 
     def next(self, action: SolitireSearchAction) -> List["SolitireSearchState"]:
         next_games = self.game.move_uncertain_states(*action)
+        if len(next_games) > self._max_next_states:
+            next_games = random.sample(next_games, self._max_next_states)
         return [SolitireSearchState(g) for g in next_games]
 
     def hash(self) -> int:
