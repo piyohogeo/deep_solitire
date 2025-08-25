@@ -38,9 +38,7 @@ class SolitireSearchState:
             raise ValueError("非終端状態に対して get_terminal_value() は呼べません。")
 
     def legal_actions(self) -> List[SolitireSearchAction]:
-        return self.game.enumerate_valid_moves_excluding_same_state(
-            is_compatibility=False
-        )
+        return self.game.enumerate_valid_moves_excluding_same_state()
 
     def next(self, action: SolitireSearchAction) -> List["SolitireSearchState"]:
         next_games = self.game.move_uncertain_states(*action)

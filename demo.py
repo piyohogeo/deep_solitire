@@ -4,7 +4,7 @@ from typing import Optional, Tuple
 
 from huggingface_hub import hf_hub_download
 from solitier_game import SolitireCardPositionFrom, SolitireCardPositionTo, SolitireGame
-from solitier_infer import SolitireValueExecuter, estimate_move_of_game
+from solitier_infer import SolitireValueExecuter, estimate_move_of_game_greedy
 from solitier_model import SolitireEndToEndValueModel
 from solitier_search import estimate_move_for_game_by_mcts
 from solitier_visualize import SolitireGameVisualizer
@@ -32,7 +32,7 @@ async def demo_one_step_greedy():
     async def estimate_move(
         game: SolitireGame,
     ) -> Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
-        return await estimate_move_of_game(
+        return await estimate_move_of_game_greedy(
             game, executer, epsilon=0.0, is_verbose=False
         )
 
@@ -55,7 +55,7 @@ async def demo_mcts():
         return await estimate_move_for_game_by_mcts(
             game,
             executer,
-            iterations=2000,
+            iterations=1000,
             batch_size=64,
             c_ucb=1.4,
             is_verbose=False,
