@@ -11,6 +11,8 @@ It supports two decision policies:
 
 ## Usage
 ```bash
+python setup.py build_ext --inplace
+
 python demo.py --help
 
 usage: demo.py [-h] [--mcts | --greedy]
@@ -25,6 +27,8 @@ options:
 
 ## Examples
 ```bash
+python setup.py build_ext --inplace
+
 # Run with the default one-step ε-greedy policy
 python demo.py --greedy
 
