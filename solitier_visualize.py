@@ -829,13 +829,13 @@ class SolitireGameVisualizer:
                             states[0].open_count() == states_verify[0].open_count()
                         ), f"{move}: {states[0].open_count()} != {states_verify[0].open_count()}"
                         for state in states_verify:
-                            assert state.states.first.verify(), f"{move}"
+                            assert state.get_last_state().verify(), f"{move}"
                         token_indicess = [
                             state_to_token_indices(state) for state in states
                         ]
                         token_hash_set = set([hash(tuple(t)) for t in token_indicess])
                         token_indicess_verify = [
-                            state.states.first.to_token_indices()
+                            state.get_last_state().to_token_indices()
                             for state in states_verify
                         ]
                         token_hash_set_verify = set(
@@ -862,8 +862,8 @@ class SolitireGameVisualizer:
                     assert set(valid_moves) == set(valid_moves_verify)
                     tokens_ref = state_to_token_indices(self.game.state)
                     tokens_verify = search_state.to_token_indices()
-                    assert (
-                        tokens_ref == tokens_verify
+                    assert tokens_ref == list(
+                        tokens_verify
                     ), f"{tokens_ref} != {tokens_verify}"
                     clock.tick(60)  # Limit to 60 FPS
                     continue

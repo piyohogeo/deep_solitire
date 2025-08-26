@@ -56,7 +56,7 @@ class SolitireSearchState:
         return [SolitireSearchState(g) for g in next_games]
 
     def hash(self) -> int:
-        return self.game.states.first.hash()
+        return self.game.get_last_state().hash()
 
     def __hash__(self):
         return self.hash()
@@ -64,7 +64,7 @@ class SolitireSearchState:
     def __eq__(self, other):
         if not isinstance(other, SolitireSearchState):
             return False
-        return self.game.states.first.is_same_state(other.game.states.first)
+        return self.game.get_last_state().is_same_state(other.game.get_last_state())
 
 
 def _enumerate_outcomes(
@@ -296,7 +296,7 @@ async def estimate_move_of_game_by_mcts(
     full_scale = 5.2 + score_args.get("complete_bonus", 0.0)
 
     async def v_batch(ss: List[SolitireSearchState]) -> List[float]:
-        states = [s.game.states.first for s in ss]
+        states = [s.game.get_last_state() for s in ss]
         vals = await executer.execute(states)
         normalized_vals = [
             val / full_scale * 2.0 - 1.0 for val in vals
