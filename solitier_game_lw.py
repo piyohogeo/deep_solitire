@@ -1,7 +1,8 @@
 import copy
 from typing import List, Tuple
 
-from pyrsistent import plist, pset
+from bitset import BitSet
+from pyrsistent import plist
 from solitier_game import (
     Card,
     FromFoundation,
@@ -29,6 +30,16 @@ from solitier_token import (
 )
 
 
+def card_to_int(card: Card) -> int:
+    return card.suit.value * 13 + (card.number - 1)
+
+
+def int_to_card(index: int) -> Card:
+    suit = Suit(index // 13)
+    number = index % 13 + 1
+    return Card(suit, number)
+
+
 class SolitireLightWeightState:
     def __init__(self, state: SolitireState):
         self._token_indices = None
@@ -46,9 +57,9 @@ class SolitireLightWeightState:
             self.opened_pile_cardss.append(
                 [card_state.card for card_state in piles if card_state.is_open]
             )
-        self.closed_cards = []
+        closed_cards = []
         for piles in state.piless:
-            self.closed_cards.extend(
+            closed_cards.extend(
                 [card_state.card for card_state in piles if not card_state.is_open]
             )
         if state.stock_cycle_count > 0:
@@ -57,8 +68,12 @@ class SolitireLightWeightState:
         else:
             self.opened_stock_cards = []
             self.closed_stock_counts = len(state.stock)
-            self.closed_cards.extend([card_state.card for card_state in state.stock])
-        self.closed_cards = pset(self.closed_cards)
+            closed_cards.extend([card_state.card for card_state in state.stock])
+        self.closed_card_indices = BitSet()
+        for closed_card in closed_cards:
+            self.closed_card_indices = self.closed_card_indices.add(
+                card_to_int(closed_card)
+            )
         self.stock_cycle_count = state.stock_cycle_count
 
         # Card -> FromPosition のマッピング
@@ -147,13 +162,15 @@ class SolitireLightWeightState:
             return [new_state]
         elif self.closed_stock_counts > 0:
             new_states = []
-            for closed_card in self.closed_cards:
+            for closed_card_index in self.closed_card_indices:
                 new_state = self.copy()
                 if len(new_state.waste_cards) > 0:
                     new_state._set_card_from_position(new_state.waste_cards[-1], None)
-                new_state.waste_cards.append(closed_card)
+                new_state.waste_cards.append(int_to_card(closed_card_index))
                 new_state.closed_stock_counts -= 1
-                new_state.closed_cards = new_state.closed_cards.discard(closed_card)
+                new_state.closed_card_indices = new_state.closed_card_indices.discard(
+                    closed_card_index
+                )
                 new_state._set_card_from_position(
                     new_state.waste_cards[-1], "FromWaste"
                 )
@@ -194,10 +211,13 @@ class SolitireLightWeightState:
 
         if from_opened_row == 0 and from_closed_pile_count > 0:
             new_states = []
-            for closed_card in self.closed_cards:
+            for closed_card_index in self.closed_card_indices:
+                closed_card = int_to_card(closed_card_index)
                 new_state = base_new_state.copy()
                 new_state.closed_pile_counts[from_col] -= 1
-                new_state.closed_cards = new_state.closed_cards.discard(closed_card)
+                new_state.closed_card_indices = new_state.closed_card_indices.discard(
+                    closed_card_index
+                )
                 new_state.opened_pile_cardss[from_col].insert(0, closed_card)
                 new_state._set_card_from_position(
                     closed_card,
@@ -245,10 +265,13 @@ class SolitireLightWeightState:
             and base_new_state.closed_pile_counts[from_col] > 0
         ):
             new_states = []
-            for closed_card in self.closed_cards:
+            for closed_card_index in self.closed_card_indices:
+                closed_card = int_to_card(closed_card_index)
                 new_state = base_new_state.copy()
                 new_state.closed_pile_counts[from_col] -= 1
-                new_state.closed_cards = new_state.closed_cards.discard(closed_card)
+                new_state.closed_card_indices = new_state.closed_card_indices.discard(
+                    closed_card_index
+                )
                 new_state.opened_pile_cardss[from_col].insert(0, closed_card)
                 new_state._set_card_from_position(
                     closed_card,
@@ -362,7 +385,7 @@ class SolitireLightWeightState:
         return True
 
     def is_all_open(self) -> bool:
-        return len(self.closed_cards) == 0
+        return len(self.closed_card_indices) == 0
 
     def open_count(self) -> int:
         foundation_count = sum(self.foundation_counts)
@@ -407,16 +430,17 @@ class SolitireLightWeightState:
                 cls_pos = self._get_card_from_position(card)
                 if verify_pos != cls_pos:
                     return False
-        if len(self.closed_cards) != self.closed_stock_counts + sum(
+        if len(self.closed_card_indices) != self.closed_stock_counts + sum(
             self.closed_pile_counts
         ):
             print(
-                f"Closed cards count mismatch: {len(self.closed_cards)} !=",
+                f"Closed cards count mismatch: {len(self.closed_card_indices)} !=",
                 f"{self.closed_stock_counts + sum(self.closed_pile_counts)}",
             )
             return False
         cards = []
-        cards.extend(self.closed_cards)
+        for closed_card_index in self.closed_card_indices:
+            cards.append(int_to_card(closed_card_index))
         cards.extend(self.opened_stock_cards)
         cards.extend(self.waste_cards)
         for suit_index, foundation_count in enumerate(self.foundation_counts):
@@ -539,7 +563,6 @@ class SolitireLightWeightGame:
             return self.valid_moves_cache
         valid_moves = self.states.first.enumerate_valid_moves()
         valid_moves_excluding_same_state = []
-        # state_set = pset(s.hash() for s in self.states)
         for from_position, to_position in valid_moves:
             new_states = self.states.first.move_uncertain_states(
                 from_position, to_position
