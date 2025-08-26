@@ -1,9 +1,10 @@
+# cython: language_level=3, boundscheck=True, wraparound=True, initializedcheck=True, nonecheck=False
+from libc.stdint cimport uint32_t, uint8_t, int32_t, uint64_t
 import copy
 import random
 from array import array
 from typing import List, Optional, Tuple
 
-from bitset import BitSet
 from solitier_game import (
     Card,
     FromFoundation,
@@ -31,14 +32,78 @@ from solitier_token import (
 )
 
 
+cdef class BitSet:
+    cdef uint64_t _mask
+
+    def __init__(self, mask: uint64_t = 0):
+        self._mask = mask
+
+    # ---- 基本操作 ----
+    def add(self, x: int) -> "BitSet":
+        """要素 x を追加した新しい BitSet を返す"""
+        return BitSet(self._mask | (1 << x))
+
+    def remove(self, x: int) -> "BitSet":
+        """要素 x を除いた新しい BitSet を返す"""
+        return BitSet(self._mask & ~(1 << x))
+
+    def discard(self, x: int) -> "BitSet":
+        """要素 x があれば除いた新しい BitSet を返す（なければそのまま）"""
+        return self.remove(x) if self.contains(x) else self
+
+    def contains(self, x: int) -> bool:
+        return (self._mask >> x) & 1
+
+    def __contains__(self, x: int) -> bool:
+        return self.contains(x)
+
+    # ---- 集合演算 ----
+    def union(self, other: "BitSet") -> "BitSet":
+        return BitSet(self._mask | other._mask)
+
+    def intersection(self, other: "BitSet") -> "BitSet":
+        return BitSet(self._mask & other._mask)
+
+    def difference(self, other: "BitSet") -> "BitSet":
+        return BitSet(self._mask & ~other._mask)
+
+    def issubset(self, other: "BitSet") -> bool:
+        return (self._mask & ~other._mask) == 0
+
+    def issuperset(self, other: "BitSet") -> bool:
+        return (other._mask & ~self._mask) == 0
+
+    # ---- その他ユーティリティ ----
+    def __len__(self) -> int:
+        return self._mask.bit_count()
+
+    def __iter__(self):
+        m = self._mask
+        while m:
+            lsb = m & -m
+            i = lsb.bit_length() - 1
+            yield i
+            m ^= lsb
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, BitSet) and self._mask == other._mask
+
+    def __hash__(self) -> int:
+        return hash(self._mask)
+
+    def __repr__(self) -> str:
+        elems = ", ".join(str(x) for x in self)
+        return f"BitSet({{{elems}}})"
+
+
 def invert_color_suits(suit_index: int) -> array:
-    match suit_index:
-        case 0 | 3:  # Spade or Club
-            return array("I", [1, 2])  # Heart or Diamond
-        case 1 | 2:  # Heart or Diamond
-            return array("I", [0, 3])  # Spade or Club
-        case _:
-            raise ValueError(f"Invalid suit index: {suit_index}")
+    # 0: Spade, 1: Heart, 2: Diamond, 3: Club と仮定
+    if suit_index == 0 or suit_index == 3:  # Spade / Club → 赤側
+        return array("I", [1, 2])  # Heart / Diamond
+    elif suit_index == 1 or suit_index == 2:  # Heart / Diamond → 黒側
+        return array("I", [0, 3])  # Spade / Club
+    else:
+        raise ValueError(f"Invalid suit index: {suit_index}")
 
 
 def card_to_int(card: Card) -> int:
@@ -64,21 +129,27 @@ def int_to_card_number(index: int) -> int:
     number = index % 13 + 1
     return number
 
+cdef inline uint32_t suit_number_to_int_u32(int suit_index, int number) nogil:
+    return <uint32_t>(suit_index * 13 + (number - 1))
 
-class SolitireLightWeightState:
-    __slots__ = (
-        "_token_indices",
-        "_hash_cache",
-        "waste_card_indices",
-        "opened_stock_card_indices",
-        "closed_stock_count",
-        "foundation_counts",
-        "closed_pile_counts",
-        "opened_pile_card_indicess",
-        "closed_card_indices",
-        "stock_cycle_count",
-        "_card_from_positions",
-    )
+cdef inline int int_to_card_suit_i(int idx) nogil:
+    return idx // 13
+
+cdef inline int int_to_card_number_i(int idx) nogil:
+    return idx % 13 + 1
+
+cdef class SolitireLightWeightState:
+    cdef object waste_card_indices
+    cdef object opened_stock_card_indices
+    cdef object foundation_counts
+    cdef object closed_pile_counts
+    cdef object opened_pile_card_indicess
+    cdef object closed_card_indices
+    cdef int    closed_stock_count
+    cdef int    stock_cycle_count
+    cdef object _card_from_positions
+    cdef object _token_indices
+    cdef object _hash_cache
 
     def __init__(self, state: SolitireState):
         self._token_indices = None
@@ -137,7 +208,7 @@ class SolitireLightWeightState:
             if foundation_count > 0:
                 suit = Suit(suit_index)
                 self._set_card_from_position(
-                    suit_number_to_int(suit_index, foundation_count),
+                    suit_number_to_int_u32(suit_index, foundation_count),
                     FromFoundation(suit),
                 )
         for col, (closed_pile_count, open_pile_card_indices) in enumerate(
@@ -148,42 +219,53 @@ class SolitireLightWeightState:
                     card_index, FromPile(col, row + closed_pile_count)
                 )
 
-    def _set_card_from_position(
+    cdef _set_card_from_position(
         self, card_index: int, from_position: SolitireCardPositionFrom
     ):
         self._card_from_positions[card_index] = from_position
 
-    def _get_card_from_position(self, card_index: int) -> SolitireCardPositionFrom:
+    cdef _get_card_from_position(self, card_index: int):
+        # -> SolitireCardPositionFrom:
         return self._card_from_positions[card_index]
 
-    def enumerate_valid_moves(self) -> List[tuple[Card, SolitireCardPositionTo]]:
+    cpdef list enumerate_valid_moves(self):
+        # -> List[tuple[Card, SolitireCardPositionTo]]
+        cdef uint32_t[:] opened_stock_card_indices = self.opened_stock_card_indices   # ← array('I') を view 化
+        cdef uint32_t[:] waste_card_indices        = self.waste_card_indices
+        cdef uint32_t[:] foundation_counts      = self.foundation_counts
+        cdef uint32_t[:] closed_pile_counts     = self.closed_pile_counts
+
+        cdef uint32_t foundation_count, col, to_col
+        cdef uint32_t suit_index, card_index, to_card_index
+        cdef uint32_t to_card_suit_index, to_card_number, from_opened_row, closed_pile_count
+
+        # 以降、長い for/if の計算は C int/uint32_t で回す
+        # Pythonオブジェクト（Suit, ToPile/ToFoundation 等）を作る直前まで C で保持
         valid_moves = []
         if (
-            len(self.opened_stock_card_indices) + self.closed_stock_count > 0
-            or len(self.waste_card_indices) > 0
+            len(opened_stock_card_indices) + self.closed_stock_count > 0
+            or len(waste_card_indices) > 0
         ):
             valid_moves.append(("FromStock", "ToStock"))
         # To Foundation
-        for suit_index, foundation_count in enumerate(self.foundation_counts):
+        for suit_index, foundation_count in enumerate(foundation_counts):
             if foundation_count < 13:
-                card_index = suit_number_to_int(suit_index, foundation_count + 1)
+                card_index = suit_number_to_int_u32(suit_index, foundation_count + 1)
                 from_position = self._get_card_from_position(card_index)
                 if from_position is not None:
                     suit = Suit(suit_index)
-                    match from_position:
-                        case FromPile(col, row):
-                            if (
-                                row
-                                == self.closed_pile_counts[col]
-                                + len(self.opened_pile_card_indicess[col])
-                                - 1
-                            ):
-                                valid_moves.append((from_position, ToFoundation(suit)))
-                        case _:
+                    if isinstance(from_position, FromPile):
+                        if from_position.row == (
+                            self.closed_pile_counts[from_position.col]
+                            + len(self.opened_pile_card_indicess[from_position.col])
+                            - 1
+                        ):
                             valid_moves.append((from_position, ToFoundation(suit)))
+                    else:
+                        valid_moves.append((from_position, ToFoundation(suit)))
         # To Pile
         for col, (closed_pile_count, open_pile_card_indices) in enumerate(
-            zip(self.closed_pile_counts, self.opened_pile_card_indicess)
+            zip(closed_pile_counts, self.opened_pile_card_indicess)
         ):
             if len(open_pile_card_indices) > 0:
                 to_card_index = open_pile_card_indices[-1]
@@ -197,7 +279,7 @@ class SolitireLightWeightState:
                         possible_from_card_suit_index
                     ) in possible_from_card_suit_indices:
                         from_position = self._get_card_from_position(
-                            suit_number_to_int(
+                            suit_number_to_int_u32(
                                 possible_from_card_suit_index, to_card_number - 1
                             ),
                         )
@@ -206,13 +288,17 @@ class SolitireLightWeightState:
             else:
                 for possible_from_card_suit_index in range(4):
                     from_position = self._get_card_from_position(
-                        suit_number_to_int(possible_from_card_suit_index, 13)
+                        suit_number_to_int_u32(possible_from_card_suit_index, 13)
                     )
                     if from_position is not None:
                         valid_moves.append((from_position, ToPile(col)))
         return valid_moves
 
-    def _move_stock_to_stock(self) -> List["SolitireLightWeightState"]:
+    cdef _move_stock_to_stock(self):
+        # -> List["SolitireLightWeightState"]:
+        cdef SolitireLightWeightState new_state
+        cdef list new_states   
+        cdef uint32_t closed_card_index, card_index
         if len(self.opened_stock_card_indices) > 0:
             new_state = self.copy()
             if len(new_state.waste_card_indices) > 0:
@@ -256,10 +342,16 @@ class SolitireLightWeightState:
         else:
             return []
 
-    def _move_pile_to_pile(
-        self, from_pile: Tuple[int, int], to_col: int
-    ) -> List["SolitireLightWeightState"]:
-        from_col, from_row = from_pile
+    cdef _move_pile_to_pile(
+        self, from_col: uint32_t, from_row: uint32_t, to_col: uint32_t
+    ):
+        # -> List["SolitireLightWeightState"]:
+        cdef SolitireLightWeightState new_state
+        cdef SolitireLightWeightState base_new_state
+        cdef list new_states
+        cdef uint32_t from_opened_row, from_closed_pile_count, to_col_offset 
+        cdef uint32_t i, card_index, closed_card_index
+
         from_closed_pile_count = self.closed_pile_counts[from_col]
         from_opened_row = from_row - from_closed_pile_count
         from_opended_pile_move_card_indices = self.opened_pile_card_indicess[from_col][
@@ -301,8 +393,11 @@ class SolitireLightWeightState:
         else:
             return [base_new_state]
 
-    def _move_waste_to_pile(self, to_col: int) -> List["SolitireLightWeightState"]:
-        new_state = self.copy()
+    cdef _move_waste_to_pile(self, to_col: uint32_t):
+        # -> List["SolitireLightWeightState"]:
+        cdef SolitireLightWeightState new_state = self.copy()
+        cdef uint32_t card_index 
+
         card_index = new_state.waste_card_indices.pop(-1)
         new_state._set_card_from_position(card_index, None)
         if len(new_state.waste_card_indices) > 0:
@@ -321,10 +416,15 @@ class SolitireLightWeightState:
         )
         return [new_state]
 
-    def _move_pile_to_foundation(
-        self, from_pile: Tuple[int, int], to_suit: Suit
-    ) -> List["SolitireLightWeightState"]:
-        from_col, from_row = from_pile
+    cdef _move_pile_to_foundation(
+        self, from_col: uint32_t, from_row: uint32_t, to_suit: Suit
+    ):
+        # -> List["SolitireLightWeightState"]:
+        cdef SolitireLightWeightState new_state
+        cdef SolitireLightWeightState base_new_state
+        cdef list new_states
+        cdef uint32_t to_suit_index, card_index, closed_card_index
+
         to_suit_index = to_suit.value
 
         base_new_state = self.copy()
@@ -332,7 +432,7 @@ class SolitireLightWeightState:
         base_new_state._set_card_from_position(card_index, FromFoundation(to_suit))
         if base_new_state.foundation_counts[to_suit_index] != 0:
             base_new_state._set_card_from_position(
-                suit_number_to_int(
+                suit_number_to_int_u32(
                     to_suit_index, base_new_state.foundation_counts[to_suit_index]
                 ),
                 None,
@@ -362,18 +462,21 @@ class SolitireLightWeightState:
         else:
             return [base_new_state]
 
-    def _move_foundation_to_pile(
-        self, from_suit: Suit, to_col: int
-    ) -> List["SolitireLightWeightState"]:
+    cdef _move_foundation_to_pile(
+        self, from_suit: Suit, to_col: uint32_t
+    ):
+        # -> List["SolitireLightWeightState"]:
+        cdef uint32_t from_suit_index, card_index
+
         from_suit_index = from_suit.value
-        new_state = self.copy()
-        card_index = suit_number_to_int(
+        cdef SolitireLightWeightState new_state = self.copy()
+        card_index = suit_number_to_int_u32(
             from_suit_index, new_state.foundation_counts[from_suit_index]
         )
         new_state.foundation_counts[from_suit_index] -= 1
         if new_state.foundation_counts[from_suit_index] != 0:
             new_state._set_card_from_position(
-                suit_number_to_int(
+                suit_number_to_int_u32(
                     from_suit_index, new_state.foundation_counts[from_suit_index]
                 ),
                 FromFoundation(from_suit),
@@ -390,16 +493,18 @@ class SolitireLightWeightState:
         )
         return [new_state]
 
-    def _move_waste_to_foundation(
+    cdef _move_waste_to_foundation(
         self, to_suit: Suit
-    ) -> List["SolitireLightWeightState"]:
+    ):
+        # -> List["SolitireLightWeightState"]:
+        cdef uint32_t to_suit_index, card_index
         to_suit_index = to_suit.value
-        new_state = self.copy()
+        cdef SolitireLightWeightState new_state = self.copy()
         card_index = new_state.waste_card_indices.pop(-1)
         new_state._set_card_from_position(card_index, FromFoundation(to_suit))
         if new_state.foundation_counts[to_suit_index] != 0:
             new_state._set_card_from_position(
-                suit_number_to_int(
+                suit_number_to_int_u32(
                     to_suit_index, new_state.foundation_counts[to_suit_index]
                 ),
                 None,
@@ -411,30 +516,52 @@ class SolitireLightWeightState:
         new_state.foundation_counts[to_suit_index] += 1
         return [new_state]
 
-    def move_uncertain_states(
+    cpdef move_uncertain_states(
         self,
         from_position: SolitireCardPositionFrom,
         to_position: SolitireCardPositionTo,
-    ) -> List["SolitireLightWeightState"]:
-        match from_position, to_position:
-            case "FromStock", "ToStock":
-                return self._move_stock_to_stock()
-            case "FromWaste", ToPile(to_col):
-                return self._move_waste_to_pile(to_col)
-            case "FromWaste", ToFoundation(to_suit):
-                return self._move_waste_to_foundation(to_suit)
-            case FromPile(from_col, from_row), ToPile(to_col):
-                return self._move_pile_to_pile((from_col, from_row), to_col)
-            case FromPile(from_col, from_row), ToFoundation(to_suit):
-                return self._move_pile_to_foundation((from_col, from_row), to_suit)
-            case FromFoundation(from_suit), ToPile(to_col):
-                return self._move_foundation_to_pile(from_suit, to_col)
-            case _, _:
-                raise ValueError(f"Invalid move from {from_position} to {to_position}")
+    ):
+        # -> List["SolitireLightWeightState"]:
+        # "FromStock", "ToStock"
+        if from_position == "FromStock" and to_position == "ToStock":
+            return self._move_stock_to_stock()
 
-    def is_same_state(
+        # "FromWaste" → ToPile
+        if from_position == "FromWaste" and isinstance(to_position, ToPile):
+            to_col = to_position.col  # ← クラスの実フィールド名に合わせる
+            return self._move_waste_to_pile(to_col)
+
+        # "FromWaste" → ToFoundation
+        if from_position == "FromWaste" and isinstance(to_position, ToFoundation):
+            to_suit = to_position.suit
+            return self._move_waste_to_foundation(to_suit)
+
+        # FromPile → ToPile
+        if isinstance(from_position, FromPile) and isinstance(to_position, ToPile):
+            return self._move_pile_to_pile(
+                from_position.col, from_position.row, to_position.col
+            )
+
+        # FromPile → ToFoundation
+        if isinstance(from_position, FromPile) and isinstance(
+            to_position, ToFoundation
+        ):
+            return self._move_pile_to_foundation(
+                from_position.col, from_position.row, to_position.suit
+            )
+
+        # FromFoundation → ToPile
+        if isinstance(from_position, FromFoundation) and isinstance(
+            to_position, ToPile
+        ):
+            return self._move_foundation_to_pile(from_position.suit, to_position.col)
+
+        raise ValueError(f"Invalid move from {from_position} to {to_position}")
+
+    cpdef is_same_state(
         self, other: "SolitireLightWeightState", is_compatibility: bool = True
-    ) -> bool:
+    ):
+        # -> bool:
         if self._token_indices is None:
             self.to_token_indices()
         if other._token_indices is None:
@@ -502,7 +629,7 @@ class SolitireLightWeightState:
             if foundation_count > 0:
                 suit = Suit(suit_index)
                 _set_card_from_position(
-                    suit_number_to_int(suit_index, foundation_count),
+                    suit_number_to_int_u32(suit_index, foundation_count),
                     FromFoundation(suit),
                 )
         for col, (closed_pile_count, open_pile_card_indices) in enumerate(
@@ -626,29 +753,33 @@ class SolitireLightWeightState:
             self.to_token_indices()
         return self._hash_cache
 
-    def copy(self) -> "SolitireLightWeightState":
-        new_state = copy.copy(self)
-        new_state.waste_card_indices = self.waste_card_indices[:]
-        new_state.foundation_counts = self.foundation_counts[:]
-        new_state.closed_pile_counts = self.closed_pile_counts[:]
-        new_state.opened_pile_card_indicess = [
-            card_indices[:] for card_indices in self.opened_pile_card_indicess
-        ]
-        new_state.opened_stock_card_indices = self.opened_stock_card_indices[:]
-        new_state._card_from_positions = self._card_from_positions.copy()
+    cpdef copy(self):
+        # -> "SolitireLightWeightState":
+        cdef SolitireLightWeightState new_state
+        new_state = <SolitireLightWeightState> self.__class__.__new__(self.__class__)
+
         new_state._token_indices = None
-        new_state._hash_cache = None
+        new_state._hash_cache    = None
+
+        new_state.waste_card_indices         = self.waste_card_indices[:]
+        new_state.foundation_counts          = self.foundation_counts[:]
+        new_state.closed_pile_counts         = self.closed_pile_counts[:]
+        new_state.opened_pile_card_indicess  = [xs[:] for xs in self.opened_pile_card_indicess]
+        new_state.opened_stock_card_indices  = self.opened_stock_card_indices[:]
+
+        new_state.closed_stock_count  = self.closed_stock_count
+        new_state.closed_card_indices = self.closed_card_indices
+        new_state.stock_cycle_count   = self.stock_cycle_count
+        new_state._card_from_positions = self._card_from_positions.copy()
         return new_state
 
 
-class SolitireLightWeightGame:
-    __slots__ = (
-        "states",
-        "valid_moves_cache",
-        "moved_states_cache",
-        "is_all_open_cache",
-        "open_count_cache",
-    )
+cdef class SolitireLightWeightGame:
+    cdef object states  # List[SolitireLightWeightState]
+    cdef object valid_moves_cache  # Optional[List[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]
+    cdef object moved_states_cache  # Optional[Dict[Tuple[SolitireCardPosition
+    cdef object is_all_open_cache  # Optional[bool]
+    cdef object open_count_cache  # Optional[int]
 
     def __init__(self, initial_states: List[SolitireLightWeightState]):
         self.states = initial_states
@@ -704,6 +835,8 @@ class SolitireLightWeightGame:
         to_position: SolitireCardPositionTo,
         max_next_states: Optional[int] = None,
     ) -> List["SolitireLightWeightGame"]:
+        cdef SolitireLightWeightGame new_game
+
         if self.moved_states_cache is None:
             self.moved_states_cache = {}
         if (from_position, to_position) in self.moved_states_cache:
@@ -760,8 +893,11 @@ class SolitireLightWeightGame:
     def from_solitire_game(cls, game: SolitireGame) -> "SolitireLightWeightGame":
         return cls([SolitireLightWeightState(state) for state in game.states])
 
-    def copy(self) -> "SolitireLightWeightGame":
-        new_game = copy.copy(self)
+    cpdef copy(self):
+        # -> "SolitireLightWeightGame":
+        cdef SolitireLightWeightGame new_game
+        new_game = <SolitireLightWeightGame> self.__class__.__new__(self.__class__)
+
         new_game.states = self.states.copy()
         new_game.moved_states_cache = None
         new_game.is_all_open_cache = None

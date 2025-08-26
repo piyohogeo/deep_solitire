@@ -13,7 +13,13 @@ from solitier_game import (
     SolitireGame,
     SolitireState,
 )
-from solitier_game_lw import SolitireLightWeightState
+
+try:
+    from solitier_game_lw_fast import SolitireLightWeightState
+except Exception:
+    print("Failed to import solitier_game_lw_fast. Make sure it is compiled.")
+    from solitier_game_lw import SolitireLightWeightState
+
 from solitier_model import SolitireAbstractEndToEndValueModel
 from solitier_token import state_to_token_indices
 

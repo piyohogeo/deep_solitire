@@ -16,7 +16,13 @@ from typing import (
 import tqdm
 from solitier_dataset import DEFAULT_SCORE_ARGS
 from solitier_game import SolitireCardPositionFrom, SolitireCardPositionTo, SolitireGame
-from solitier_game_lw import SolitireLightWeightGame
+
+try:
+    from solitier_game_lw_fast import SolitireLightWeightGame
+except Exception:
+    print("Failed to import solitier_game_lw_fast. Make sure it is compiled.")
+    from solitier_game_lw import SolitireLightWeightGame
+
 from solitier_infer import (
     AbstractSolitireValueExecutor,
     SolitireValueExecuter,
@@ -47,12 +53,9 @@ class SolitireSearchState:
         return self.game.enumerate_valid_moves_excluding_same_state()
 
     def next(self, action: SolitireSearchAction) -> List["SolitireSearchState"]:
-        next_games = self.game.move_uncertain_states(*action)
-        if (
-            self._max_next_states is not None
-            and len(next_games) > self._max_next_states
-        ):
-            next_games = random.sample(next_games, self._max_next_states)
+        next_games = self.game.move_uncertain_states(
+            *action, max_next_states=self._max_next_states
+        )
         return [SolitireSearchState(g) for g in next_games]
 
     def hash(self) -> int:
@@ -317,6 +320,7 @@ async def estimate_move_of_game_by_mcts(
     except Exception as e:
         print(f"MCTS中にエラー発生: {e}")
         mct_move = None
+        raise e
     if mct_move is None:
         return await estimate_move_of_game_greedy(
             game, executer, epsilon=0.0, is_verbose=is_verbose

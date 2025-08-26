@@ -18,8 +18,14 @@ from solitier_game import (
     ToPile,
     all_cards,
 )
-from solitier_game_lw import SolitireLightWeightGame, SolitireLightWeightState
 from solitier_token import state_to_token_indices
+
+try:
+    from solitier_game_lw_fast import SolitireLightWeightGame, SolitireLightWeightState
+except Exception:
+    print("Failed to import solitier_game_lw_fast. Make sure it is compiled.")
+    from solitier_game_lw import SolitireLightWeightGame, SolitireLightWeightState
+
 
 suit_filenames = ["clubs", "diamonds", "hearts", "spades"]  # カードのスート名
 number_filenames = [
