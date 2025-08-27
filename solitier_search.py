@@ -34,6 +34,8 @@ SolitireSearchAction = Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]
 
 
 class SolitireSearchState:
+    __slots__ = ("game", "_max_next_states")
+
     def __init__(self, game: SolitireLightWeightGame, max_next_states: int = 16):
         self.game = game
         self._max_next_states = max_next_states
@@ -320,7 +322,6 @@ async def estimate_move_of_game_by_mcts(
     except Exception as e:
         print(f"MCTS中にエラー発生: {e}")
         mct_move = None
-        raise e
     if mct_move is None:
         return await estimate_move_of_game_greedy(
             game, executer, epsilon=0.0, is_verbose=is_verbose
