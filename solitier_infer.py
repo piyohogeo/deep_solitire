@@ -86,11 +86,11 @@ class SolitireValueBucketGraphExecutor:
             b *= 2
         self._buckets.append(batch_size)
 
-    def _pick_bucket(self, batch_size: int) -> int:
-        assert batch_size <= self._buckets[-1]
+    def _pick_bucket(self, batch_size: int) -> Optional[int]:
         for b in self._buckets:
             if b >= batch_size:
                 return b
+        return None
 
     def _build_graph(self, batch_size: int):
         x = torch.randint(
@@ -126,6 +126,8 @@ class SolitireValueBucketGraphExecutor:
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             b = x.size(0)
             B = self._pick_bucket(b)
+            if B is None:
+                return self.model(x)  # バッチサイズが大きすぎる場合は普通に実行
             static_in = self._static_inputs[B]
             static_out = self._static_outputs[B]
             g = self._graph[B]
