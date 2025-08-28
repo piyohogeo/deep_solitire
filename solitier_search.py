@@ -25,7 +25,6 @@ except Exception:
 
 from solitier_infer import (
     AbstractSolitireValueExecutor,
-    SolitireValueExecuter,
     estimate_move_of_game_greedy,
     loop_log_play_game_by_move_estimator,
 )
@@ -273,7 +272,7 @@ async def mcts_with_value_and_chance_batched(
 
 async def estimate_move_of_game_by_mcts(
     game: SolitireGame,
-    executer: SolitireValueExecuter,
+    executer: AbstractSolitireValueExecutor,
     iterations: int = 2000,
     batch_size: int = 64,
     c_ucb: float = 1.4,
@@ -344,7 +343,7 @@ async def loop_log_play_game_with_executor_mcts(
 ) -> None:
     async def estimate_move(
         game: SolitireGame,
-    ) -> Awaitable[Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]]:
+    ) -> Optional[Tuple[SolitireCardPositionFrom, SolitireCardPositionTo]]:
         return await estimate_move_of_game_by_mcts(
             game,
             executor,

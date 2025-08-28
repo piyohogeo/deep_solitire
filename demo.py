@@ -5,7 +5,11 @@ from typing import Optional, Tuple
 
 from huggingface_hub import hf_hub_download
 from solitier_game import SolitireCardPositionFrom, SolitireCardPositionTo, SolitireGame
-from solitier_infer import SolitireValueExecuter, estimate_move_of_game_greedy
+from solitier_infer import (
+    SolitireValueBucketGraphExecutor,
+    SolitireValueExecuter,
+    estimate_move_of_game_greedy,
+)
 from solitier_model import SolitireEndToEndValueModel
 from solitier_search import estimate_move_of_game_by_mcts
 from solitier_visualize import SolitireGameVisualizer
@@ -48,7 +52,8 @@ async def demo_mcts():
     model = SolitireEndToEndValueModel.load_from_file(os.path.split(pth)[0])
     game = SolitireGame()
     visualizer = SolitireGameVisualizer(game)
-    executer = SolitireValueExecuter(model)
+    batch_size = 64
+    executer = SolitireValueBucketGraphExecutor(model, batch_size=batch_size)
 
     async def estimate_move(
         game: SolitireGame,
@@ -57,7 +62,7 @@ async def demo_mcts():
             game,
             executer,
             iterations=1000,
-            batch_size=64,
+            batch_size=batch_size,
             c_ucb=1.4,
             epsilon=0.1,
             is_verbose=False,
