@@ -63,7 +63,7 @@ async def demo_mcts():
             executer,
             iterations=1000,
             batch_size=batch_size,
-            c_ucb=1.4,
+            c_ucb=1.0,
             epsilon=0.1,
             is_verbose=False,
             is_tqdm=False,
