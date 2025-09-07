@@ -15,14 +15,13 @@ from solitier_search import estimate_move_of_game_by_mcts
 from solitier_visualize import SolitireGameVisualizer
 
 repo_id = "piyohogeo/deep_solitire"
-# 28.8% @ one-step e-greedy(0.1)
 pth = hf_hub_download(
     repo_id,
-    filename="value/solitire_endtoend_value_m512_l18_h8_n74_cb0.00_scr0.1445_dss_20250820_012942/best_model.pth",
+    filename="value/solitire_endtoend_value_m512_l18_h8_n74_cb0.00_scr0.1834_20250904_055613/best_model.pth",
 )  # パスはアップロードした場所に合わせて
 jpath = hf_hub_download(
     repo_id,
-    filename="value/solitire_endtoend_value_m512_l18_h8_n74_cb0.00_scr0.1445_dss_20250820_012942/best_model_params.json",
+    filename="value/solitire_endtoend_value_m512_l18_h8_n74_cb0.00_scr0.1834_20250904_055613/best_model_params.json",
 )
 print(f"Model path: {pth}")
 print(f"Model params path: {jpath}")

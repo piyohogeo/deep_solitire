@@ -41,8 +41,8 @@ python demo.py --mcts
 Completion rate (i.e., “all cards opened”), with a maximum of 200 moves:
 | Group | Complete/Total   | Win rate     | 95%CI (Wilson) |
 |---|-----------:|---------:|---------------:|
-| One-step ε-greedy (ε = 0.1) | 18250/63293 | **28.83%** | 28.48–29.19%   |
-| Monte Carlo Tree Search (ε = 0.1, iterations = 1000) |  5793/15131 | **38.29%** | 37.51–39.06%   |
+| One-step ε-greedy (ε = 0.1) | 16676/52513 | **31.76%** | 31.36–32.16%   |
+| Monte Carlo Tree Search (ε = 0.1, iterations = 1000) |  5971/14645 | **40.77%** | 39.98–41.57%   |
 
 ## Card image source
 By Byron Knoll [OpenGameArt.org](https://opengameart.org/content/playing-cards-vector-png#:~:text=Playing%20Cards%20)
